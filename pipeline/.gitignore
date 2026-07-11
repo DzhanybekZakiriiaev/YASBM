@@ -1,0 +1,7 @@
+.venv
+__pycache__
+weights/
+*.pt
+dist
+.pytest_cache
+artifacts/

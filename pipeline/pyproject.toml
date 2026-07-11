@@ -1,0 +1,30 @@
+[project]
+name = "kepler-pipeline"
+version = "0.0.2"
+description = "KEPLER inference pipeline: segment -> track -> depth -> scene -> lift -> physics."
+requires-python = ">=3.12,<3.13"
+# NOTE: torch / SAM 2 / CoTracker / Depth Anything V2 / VGGT are declared in the
+# Modal Image (see modal_app.py). They are NOT installed via uv locally because
+# the pipeline only runs on Modal L4 GPUs. `uv sync` here is enough to run
+# `modal deploy pipeline/modal_app.py`.
+dependencies = [
+    "fastapi>=0.117,<1",
+    "uvicorn[standard]>=0.32,<1",
+    "python-multipart>=0.0.12",
+    "pillow>=11",
+    "numpy>=2.1,<3",
+    "scipy>=1.14",
+    "opencv-python-headless>=4.10",
+    "pydantic>=2.9,<3",
+    "modal>=0.66",
+    "anthropic>=0.40",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.9",
+    "pytest>=8",
+]
+
+[tool.uv]
+package = false
