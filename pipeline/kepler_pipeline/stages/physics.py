@@ -108,11 +108,16 @@ def physics(tracks_3d: np.ndarray, timestamps: np.ndarray) -> dict:
         noise_floor = 0.0
 
     per_frame_sigma = per_frame_max / max(noise_floor, 1e-6)
+    # Per-track per-frame σ: each track's residual divided by the shared
+    # noise-floor. Shape (N, T). Frontend uses this to paint the violating
+    # object red on the video overlay.
+    per_track_sigma = stacked / max(noise_floor, 1e-6)  # (N, T)
 
     return {
         "residuals": per_track_residuals,
         "per_frame_max": per_frame_max.astype(np.float32),
         "per_frame_sigma": per_frame_sigma.astype(np.float32),
+        "per_track_sigma": per_track_sigma.astype(np.float32),
         "peak_sigma": float(peak_sigma),
         "noise_floor": noise_floor,
         "track_fits": track_fits,

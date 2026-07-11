@@ -22,6 +22,14 @@ class Track(BaseModel):
     track_id: int
     label: str
     points: list[TrajectoryPoint]
+    # Normalized 2D pixel positions (u, v) in [0, 1] per frame, so the browser
+    # can render the tracked point directly on the video without knowing frame
+    # dimensions. Length matches len(points).
+    points_2d: list[tuple[float, float]] | None = None
+    # Per-frame residual σ for THIS track (not the aggregated max across
+    # tracks). Lets the frontend highlight which specific object is
+    # violating physics at each frame.
+    sigma_per_frame: list[float] | None = None
 
 
 class Residual(BaseModel):
@@ -57,3 +65,10 @@ class AnalyzeResponse(BaseModel):
     )
     point_cloud_url: str | None = None
     error: str | None = None
+    # Video source dimensions in pixels. Frontend uses this only if it wants
+    # to un-normalize 2D positions — the normalized coordinates work as-is
+    # for CSS-percent positioning over the <video> element.
+    frame_width: int | None = None
+    frame_height: int | None = None
+    fps: float | None = None
+    duration_s: float | None = None

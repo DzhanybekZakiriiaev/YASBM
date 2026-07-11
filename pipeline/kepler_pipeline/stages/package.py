@@ -15,9 +15,12 @@ import numpy as np
 
 
 def _write_ascii_ply(
-    points: np.ndarray, colors: np.ndarray | None, path: Path
+    points: np.ndarray,
+    colors: np.ndarray | None,
+    faces: np.ndarray | None,
+    path: Path,
 ) -> None:
-    """Write an ASCII PLY with vertex positions (and optional RGB)."""
+    """Write an ASCII PLY with vertex positions, optional RGB, optional faces."""
 
     pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
     has_color = colors is not None and colors.size > 0
@@ -25,8 +28,13 @@ def _write_ascii_ply(
     if has_color:
         rgb = np.asarray(colors, dtype=np.uint8).reshape(-1, 3)
         if rgb.shape[0] != pts.shape[0]:
-            # Length mismatch → drop colour rather than corrupt the file.
             has_color = False
+
+    has_faces = faces is not None and faces.size > 0
+    if has_faces:
+        fc = np.asarray(faces, dtype=np.int32).reshape(-1, 3)
+    else:
+        fc = np.zeros((0, 3), dtype=np.int32)
 
     header_lines = [
         "ply",
@@ -44,6 +52,9 @@ def _write_ascii_ply(
                 "property uchar blue",
             ]
         )
+    if has_faces:
+        header_lines.append(f"element face {fc.shape[0]}")
+        header_lines.append("property list uchar int vertex_indices")
     header_lines.append("end_header\n")
     header = "\n".join(header_lines)
 
@@ -55,6 +66,9 @@ def _write_ascii_ply(
         else:
             for x, y, z in pts:
                 fh.write(f"{x:.6f} {y:.6f} {z:.6f}\n")
+        if has_faces:
+            for a, b, c in fc:
+                fh.write(f"3 {int(a)} {int(b)} {int(c)}\n")
 
 
 def package(
@@ -64,6 +78,7 @@ def package(
     residuals: dict,
     out_dir: Path,
     point_cloud_rgb: np.ndarray | None = None,
+    point_cloud_faces: np.ndarray | None = None,
 ) -> dict[str, str]:
     """Serialise pipeline outputs into ``out_dir``.
 
@@ -97,7 +112,9 @@ def package(
     tracks_path = out_dir / "tracks.json"
     residuals_path = out_dir / "residuals.json"
 
-    _write_ascii_ply(point_cloud_xyz, point_cloud_rgb, ply_path)
+    _write_ascii_ply(
+        point_cloud_xyz, point_cloud_rgb, point_cloud_faces, ply_path
+    )
 
     # Tracks JSON: list of Track dicts.
     tracks_payload: list[dict] = []

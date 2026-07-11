@@ -13,6 +13,8 @@ export interface AnalysisProgress {
   pct: number;
 }
 
+export type FlythroughStatus = "idle" | "generating" | "done" | "error";
+
 interface AnalysisState {
   videoFile: File | null;
   videoUrl: string | null;
@@ -21,6 +23,18 @@ interface AnalysisState {
   verdict: string | null;
   analysisResult: api.AnalyzeResponse | null;
   error: string | null;
+  // ViewCrafter flythrough state
+  flythroughStatus: FlythroughStatus;
+  flythroughUrl: string | null;
+  flythroughError: string | null;
+  // Playhead — video's current time in seconds. Player pushes this in on
+  // RVFC / timeupdate; Timeline reads it to render the scrubber head;
+  // Viewer3D reads it to animate per-frame track markers.
+  currentTimeS: number;
+  durationS: number;
+  // Seek request: external components (Timeline) set this; Player watches
+  // and seeks the underlying <video>, then clears back to null.
+  seekRequestS: number | null;
   setVideo: (file: File) => void;
   reset: () => void;
   setStatus: (status: AnalysisStatus) => void;
@@ -28,6 +42,11 @@ interface AnalysisState {
   setVerdict: (verdict: string | null) => void;
   setError: (error: string | null) => void;
   runAnalyze: () => Promise<void>;
+  runFlythrough: (frame: Blob) => Promise<void>;
+  clearFlythrough: () => void;
+  setCurrentTimeS: (t: number) => void;
+  setDurationS: (t: number) => void;
+  requestSeek: (t: number | null) => void;
 }
 
 export const useAnalysisStore = create<AnalysisState>((set, get) => ({
@@ -38,6 +57,12 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
   verdict: null,
   analysisResult: null,
   error: null,
+  flythroughStatus: "idle",
+  flythroughUrl: null,
+  flythroughError: null,
+  currentTimeS: 0,
+  durationS: 0,
+  seekRequestS: null,
   setVideo: (file) => {
     const prev = get().videoUrl;
     if (prev) URL.revokeObjectURL(prev);
@@ -50,6 +75,12 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
       verdict: null,
       analysisResult: null,
       error: null,
+      flythroughStatus: "idle",
+      flythroughUrl: null,
+      flythroughError: null,
+      currentTimeS: 0,
+      durationS: 0,
+      seekRequestS: null,
     });
   },
   reset: () => {
@@ -63,6 +94,12 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
       verdict: null,
       analysisResult: null,
       error: null,
+      flythroughStatus: "idle",
+      flythroughUrl: null,
+      flythroughError: null,
+      currentTimeS: 0,
+      durationS: 0,
+      seekRequestS: null,
     });
   },
   setStatus: (status) => set({ status }),
@@ -113,4 +150,34 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
       });
     }
   },
+  runFlythrough: async (frame: Blob) => {
+    set({
+      flythroughStatus: "generating",
+      flythroughUrl: null,
+      flythroughError: null,
+    });
+    try {
+      const result = await api.generateFlythrough(frame);
+      set({
+        flythroughStatus: "done",
+        flythroughUrl: result.flythrough_url,
+        flythroughError: null,
+      });
+    } catch (err) {
+      set({
+        flythroughStatus: "error",
+        flythroughError: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+  clearFlythrough: () => {
+    set({
+      flythroughStatus: "idle",
+      flythroughUrl: null,
+      flythroughError: null,
+    });
+  },
+  setCurrentTimeS: (t) => set({ currentTimeS: t }),
+  setDurationS: (t) => set({ durationS: t }),
+  requestSeek: (t) => set({ seekRequestS: t }),
 }));

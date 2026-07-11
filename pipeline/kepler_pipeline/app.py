@@ -160,11 +160,24 @@ async def analyze(request: Request, video: UploadFile = File(...)) -> AnalyzeRes
             residuals=physics_out,
             out_dir=request_artifacts,
             point_cloud_rgb=point_cloud_rgb,
+            point_cloud_faces=scene_out.get("faces"),
         )
+
+        # Normalized 2D pixel positions (u, v) in [0, 1] per track per frame.
+        tracks_2d_norm = tracks_2d.copy().astype(np.float32)
+        tracks_2d_norm[..., 0] /= float(width)
+        tracks_2d_norm[..., 1] /= float(height)
+        tracks_2d_norm = np.clip(tracks_2d_norm, 0.0, 1.0)
+        per_track_sigma = physics_out.get("per_track_sigma")
 
         response_tracks: list[Track] = []
         t, n, _ = tracks_3d.shape
         for track_id in range(n):
+            sigmas = (
+                [float(per_track_sigma[track_id, i]) for i in range(t)]
+                if per_track_sigma is not None
+                else None
+            )
             response_tracks.append(
                 Track(
                     track_id=track_id,
@@ -180,6 +193,14 @@ async def analyze(request: Request, video: UploadFile = File(...)) -> AnalyzeRes
                         )
                         for i in range(t)
                     ],
+                    points_2d=[
+                        (
+                            float(tracks_2d_norm[i, track_id, 0]),
+                            float(tracks_2d_norm[i, track_id, 1]),
+                        )
+                        for i in range(t)
+                    ],
+                    sigma_per_frame=sigmas,
                 )
             )
 
@@ -200,6 +221,7 @@ async def analyze(request: Request, video: UploadFile = File(...)) -> AnalyzeRes
         ply_name = Path(artifact_paths["point_cloud"]).name
         base_url = str(request.base_url).rstrip("/")
         point_cloud_url = f"{base_url}/artifacts/{request_id}/{ply_name}"
+        duration_s = float(timestamps[-1]) if len(timestamps) else 0.0
 
         return AnalyzeResponse(
             status=AnalyzeStatus.done,
@@ -208,6 +230,10 @@ async def analyze(request: Request, video: UploadFile = File(...)) -> AnalyzeRes
             verdict_score=peak_sigma,
             point_cloud_url=point_cloud_url,
             error=None,
+            frame_width=int(width),
+            frame_height=int(height),
+            fps=float(fps),
+            duration_s=duration_s,
         )
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)

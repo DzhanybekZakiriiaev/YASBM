@@ -78,8 +78,11 @@ def lift(
     z = depth_maps[t_idx, v_idx, u_idx].astype(np.float32)  # (T, N)
 
     # Camera-frame coordinates.
+    # Y is flipped so that world-up is +Y, matching scene.py's convention.
+    # Without this, tracks live in an inverted-Y frame relative to the point
+    # cloud and the trajectory + reconstruction never visually align.
     x_c = (u - cx) * z / fx
-    y_c = (v - cy) * z / fy
+    y_c = -(v - cy) * z / fy
     z_c = z
 
     # Homogeneous points, shape (T, N, 4).

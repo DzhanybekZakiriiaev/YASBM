@@ -16,10 +16,14 @@ function fmt(t: number): string {
 export function Player() {
   const videoUrl = useAnalysisStore((s) => s.videoUrl);
   const reset = useAnalysisStore((s) => s.reset);
+  const seekRequestS = useAnalysisStore((s) => s.seekRequestS);
+  const requestSeek = useAnalysisStore((s) => s.requestSeek);
+  const setCurrentTimeS = useAnalysisStore((s) => s.setCurrentTimeS);
+  const setDurationS = useAnalysisStore((s) => s.setDurationS);
+  const currentTimeS = useAnalysisStore((s) => s.currentTimeS);
+  const durationS = useAnalysisStore((s) => s.durationS);
   const ref = useRef<HTMLVideoElement>(null);
   const [playing, setPlaying] = useState(false);
-  const [current, setCurrent] = useState(0);
-  const [duration, setDuration] = useState(0);
   const [frame, setFrame] = useState(0);
 
   const toggle = useCallback(() => {
@@ -32,17 +36,27 @@ export function Player() {
     }
   }, []);
 
+  // Watch external seek requests (from Timeline scrubber).
+  useEffect(() => {
+    if (seekRequestS === null) return;
+    const el = ref.current;
+    if (!el) return;
+    el.currentTime = Math.max(0, Math.min(durationS || seekRequestS, seekRequestS));
+    requestSeek(null);
+  }, [seekRequestS, durationS, requestSeek]);
+
   useEffect(() => {
     const el = ref.current as RVFCVideoElement | null;
     if (!el) return;
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
-    const onTime = () => setCurrent(el.currentTime);
-    const onMeta = () => setDuration(el.duration);
+    const onTime = () => setCurrentTimeS(el.currentTime);
+    const onMeta = () => setDurationS(el.duration);
     el.addEventListener("play", onPlay);
     el.addEventListener("pause", onPause);
     el.addEventListener("timeupdate", onTime);
     el.addEventListener("loadedmetadata", onMeta);
+    el.addEventListener("seeked", onTime);
 
     let handle: number | undefined;
     let cancelled = false;
@@ -52,6 +66,8 @@ export function Player() {
       if (cancelled) return;
       const fps = 30;
       setFrame(Math.round(metadata.mediaTime * fps));
+      // Sub-timeupdate resolution — push RVFC's mediaTime for smoother 3D sync.
+      setCurrentTimeS(metadata.mediaTime);
       if (rvfc) handle = rvfc(step);
     };
     if (rvfc) handle = rvfc(step);
@@ -62,9 +78,10 @@ export function Player() {
       el.removeEventListener("pause", onPause);
       el.removeEventListener("timeupdate", onTime);
       el.removeEventListener("loadedmetadata", onMeta);
+      el.removeEventListener("seeked", onTime);
       if (handle !== undefined && cancelRvfc) cancelRvfc(handle);
     };
-  }, [videoUrl]);
+  }, [videoUrl, setCurrentTimeS, setDurationS]);
 
   if (!videoUrl) return null;
 
@@ -87,7 +104,7 @@ export function Player() {
           {playing ? "pause" : "play"}
         </button>
         <div className="tabular-nums">
-          {fmt(current)}s / {fmt(duration)}s
+          {fmt(currentTimeS)}s / {fmt(durationS)}s
         </div>
         <div className="tabular-nums">frame {frame}</div>
         <button

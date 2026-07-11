@@ -67,6 +67,12 @@ export async function loadPLYPointCloud(
     // PLYLoader stores color as float [0,1] already; nothing to normalize.
   }
 
+  // If the PLY had face indices, PLYLoader sets `geometry.index`. Ensure
+  // we have per-vertex normals so lighting works on the mesh render path.
+  if (geometry.index) {
+    geometry.computeVertexNormals();
+  }
+
   geometry.computeBoundingSphere();
   geometry.computeBoundingBox();
   return geometry;

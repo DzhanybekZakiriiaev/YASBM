@@ -2,8 +2,9 @@ import { useAnalysisStore } from "./state/analysis";
 import { Uploader } from "./components/Uploader";
 import { Player } from "./components/Player";
 import { Viewer3D } from "./components/Viewer3D";
-import { ResidualChart } from "./components/ResidualChart";
+import { Timeline } from "./components/Timeline";
 import { Verdict } from "./components/Verdict";
+import { FlythroughButton } from "./components/FlythroughButton";
 
 export default function App() {
   const videoUrl = useAnalysisStore((s) => s.videoUrl);
@@ -24,15 +25,21 @@ export default function App() {
         </div>
       </header>
 
-      <main className="grid grid-cols-1 gap-6 p-6 lg:grid-cols-2">
-        <section className="min-h-[420px]">
-          {videoUrl ? <Player /> : <Uploader />}
-        </section>
-        <section className="flex flex-col gap-6">
-          <Viewer3D />
-          <ResidualChart />
-          <Verdict />
-        </section>
+      <main className="mx-auto flex w-full max-w-[1600px] flex-col gap-6 p-6">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <section className="min-h-[420px]">
+            {videoUrl ? <Player /> : <Uploader />}
+          </section>
+          <section className="flex flex-col gap-4">
+            <Viewer3D />
+            <FlythroughButton />
+          </section>
+        </div>
+        {/* Full-width timeline strip — scrubbing here drives the video AND
+            the 3D scene's animated track markers, so hovering a peak σ
+            frame instantly reveals the offending object in 3D. */}
+        <Timeline />
+        <Verdict />
       </main>
     </div>
   );

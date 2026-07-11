@@ -24,6 +24,10 @@ class SceneOutput(TypedDict):
     camera_poses: np.ndarray  # (T, 4, 4) float32
     xyz: np.ndarray  # (N, 3) float32 world-frame points, metres
     rgb: np.ndarray  # (N, 3) uint8 per-vertex color
+    # Triangle indices (M, 3) int32 into xyz. Empty ndarray when meshing
+    # is disabled or degenerates. Enables rendering the scene as a solid
+    # mesh instead of a sparse point cloud.
+    faces: np.ndarray
 
 
 def _default_intrinsics(width: int, height: int) -> np.ndarray:
@@ -45,7 +49,7 @@ def _default_intrinsics(width: int, height: int) -> np.ndarray:
 def scene(
     frames: list[np.ndarray],
     depth_maps: np.ndarray | None = None,
-    max_points: int = 12_000,
+    max_points: int = 60_000,
 ) -> SceneOutput:
     """Return camera poses + a colored point cloud.
 
@@ -78,15 +82,39 @@ def scene(
             [2.0, 2.0, 4.0], dtype=np.float32
         ) - np.array([1.0, 1.0, 2.0], dtype=np.float32)
         rgb = np.full((512, 3), 128, dtype=np.uint8)
-        return SceneOutput(camera_poses=identity, xyz=xyz, rgb=rgb)
+        return SceneOutput(
+            camera_poses=identity,
+            xyz=xyz,
+            rgb=rgb,
+            faces=np.zeros((0, 3), dtype=np.int32),
+        )
 
-    frame = frames[0]  # (H, W, 3)
-    depth = depth_maps[0]  # (H, W)
+    # Median depth across frames — robust to moving objects. If a person
+    # walks across a static camera, most frames see the wall behind them,
+    # so the temporal median picks the wall depth rather than blending
+    # foreground + background into an unusable soup.
+    depth_stack = depth_maps.astype(np.float32)
+    depth = np.median(depth_stack, axis=0)  # (H, W) — median depth per pixel.
+
+    # Per-pixel motion mask. Pixels whose depth varies a lot across frames
+    # are moving foreground (person walking, hands, anything dynamic). We
+    # drop those from the mesh construction entirely so the reconstructed
+    # room is pure static geometry — clean walls / bed / lamp — and the
+    # frontend's animated TrackMarkers do the "person walking through" job.
+    # Threshold = 15% of the median depth for that pixel, clamped so we
+    # don't over-remove noise on distant walls.
+    depth_iqr = np.percentile(depth_stack, 75, axis=0) - np.percentile(
+        depth_stack, 25, axis=0
+    )
+    motion_threshold = np.maximum(0.15 * depth, 0.25)  # metres
+    static_mask = depth_iqr < motion_threshold  # True where the pixel is stable
+
+    frame = frames[0]  # (H, W, 3) — RGB anchor from frame 0
     height, width = depth.shape
 
-    # Choose a stride so we end up with <= max_points.
-    target = max(int(np.ceil(np.sqrt(max_points))), 32)
-    stride = max(1, min(height, width) // target)
+    # Choose a stride so we end up with ~max_points samples on the actual
+    # frame dimensions. Solving `(H*W)/stride^2 <= max_points`.
+    stride = max(1, int(np.ceil(np.sqrt(height * width / max_points))))
 
     intrinsics = _default_intrinsics(width, height)
     fx, fy = intrinsics[0, 0], intrinsics[1, 1]
@@ -94,15 +122,82 @@ def scene(
 
     ys = np.arange(0, height, stride)
     xs = np.arange(0, width, stride)
+    n_rows = len(ys)
+    n_cols = len(xs)
     grid_v, grid_u = np.meshgrid(ys, xs, indexing="ij")
-    grid_v = grid_v.reshape(-1)
-    grid_u = grid_u.reshape(-1)
 
-    z = depth[grid_v, grid_u].astype(np.float32)
+    z = depth[grid_v, grid_u].astype(np.float32)  # (n_rows, n_cols)
     x = (grid_u - cx) * z / fx
     y = -(grid_v - cy) * z / fy  # flip Y so up is +Y in world frame
+    is_static_grid = static_mask[grid_v, grid_u]  # (n_rows, n_cols) bool
 
-    xyz = np.stack([x, y, z], axis=1).astype(np.float32)
-    rgb = frame[grid_v, grid_u].astype(np.uint8)
+    xyz_grid = np.stack([x, y, z], axis=-1).astype(np.float32)  # (n_rows, n_cols, 3)
+    xyz = xyz_grid.reshape(-1, 3)
+    rgb = frame[grid_v, grid_u].reshape(-1, 3).astype(np.uint8)
 
-    return SceneOutput(camera_poses=identity, xyz=xyz, rgb=rgb)
+    faces = _build_edge_filtered_faces(
+        xyz_grid, n_rows, n_cols, static_grid=is_static_grid
+    )
+
+    return SceneOutput(camera_poses=identity, xyz=xyz, rgb=rgb, faces=faces)
+
+
+def _build_edge_filtered_faces(
+    xyz_grid: np.ndarray,
+    n_rows: int,
+    n_cols: int,
+    static_grid: np.ndarray | None = None,
+) -> np.ndarray:
+    """Delaunay-in-a-grid: two triangles per cell, drop any triangle whose
+    3D edge lengths exceed ~3× the median cell edge. That kills the huge
+    stretched triangles that would otherwise bridge foreground objects and
+    the wall behind them — the "cardboard-cutout depth-image" look.
+
+    If ``static_grid`` is provided (bool array matching (n_rows, n_cols)),
+    also drop any triangle whose vertices include a moving-object pixel.
+    That keeps the mesh pure static room — moving people are not baked
+    into flat cutouts on the wall.
+    """
+
+    if n_rows < 2 or n_cols < 2:
+        return np.zeros((0, 3), dtype=np.int32)
+
+    # Vertex index into the flat xyz array: (r, c) -> r * n_cols + c.
+    r = np.arange(n_rows - 1)
+    c = np.arange(n_cols - 1)
+    rr, cc = np.meshgrid(r, c, indexing="ij")
+    top_left = (rr * n_cols + cc).reshape(-1)
+    top_right = top_left + 1
+    bot_left = top_left + n_cols
+    bot_right = bot_left + 1
+
+    # Two triangles per cell.
+    tri_a = np.stack([top_left, bot_right, top_right], axis=1)
+    tri_b = np.stack([top_left, bot_left, bot_right], axis=1)
+    all_faces = np.concatenate([tri_a, tri_b], axis=0)
+
+    # Filter by edge length: compute max edge per triangle in 3D.
+    xyz_flat = xyz_grid.reshape(-1, 3)
+    p0 = xyz_flat[all_faces[:, 0]]
+    p1 = xyz_flat[all_faces[:, 1]]
+    p2 = xyz_flat[all_faces[:, 2]]
+    e01 = np.linalg.norm(p1 - p0, axis=1)
+    e12 = np.linalg.norm(p2 - p1, axis=1)
+    e20 = np.linalg.norm(p0 - p2, axis=1)
+    max_edge = np.maximum(np.maximum(e01, e12), e20)
+
+    median_edge = float(np.median(max_edge)) if max_edge.size else 0.0
+    threshold = max(median_edge * 3.0, 0.01)  # metres
+    keep = max_edge < threshold
+
+    if static_grid is not None:
+        static_flat = static_grid.reshape(-1)
+        # Keep a triangle only if ALL three of its vertices are static.
+        vertex_static = (
+            static_flat[all_faces[:, 0]]
+            & static_flat[all_faces[:, 1]]
+            & static_flat[all_faces[:, 2]]
+        )
+        keep = keep & vertex_static
+
+    return all_faces[keep].astype(np.int32)

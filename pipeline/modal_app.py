@@ -190,13 +190,31 @@ class KeplerPipeline:
                 residuals=physics_out,
                 out_dir=out_dir,
                 point_cloud_rgb=scene_out["rgb"],
+                point_cloud_faces=scene_out.get("faces"),
             )
             # Make writes visible to the web container.
             artifacts_vol.commit()
 
+            # Normalized 2D positions (u, v) in [0, 1] per track per frame.
+            # tracks_2d shape (T, N, 2) is (u_px, v_px). Divide by frame size.
+            tracks_2d_norm = tracks_2d.copy().astype(np.float32)
+            tracks_2d_norm[..., 0] /= float(width)
+            tracks_2d_norm[..., 1] /= float(height)
+            tracks_2d_norm = np.clip(tracks_2d_norm, 0.0, 1.0)
+
+            per_track_sigma = physics_out.get("per_track_sigma")
+
             response_tracks: list[dict] = []
             t, n, _ = tracks_3d.shape
             for track_id in range(n):
+                sigmas_2d = (
+                    [
+                        float(per_track_sigma[track_id, i])
+                        for i in range(t)
+                    ]
+                    if per_track_sigma is not None
+                    else None
+                )
                 response_tracks.append(
                     {
                         "track_id": track_id,
@@ -212,6 +230,14 @@ class KeplerPipeline:
                             }
                             for i in range(t)
                         ],
+                        "points_2d": [
+                            [
+                                float(tracks_2d_norm[i, track_id, 0]),
+                                float(tracks_2d_norm[i, track_id, 1]),
+                            ]
+                            for i in range(t)
+                        ],
+                        "sigma_per_frame": sigmas_2d,
                     }
                 )
 
@@ -229,6 +255,7 @@ class KeplerPipeline:
                     )
 
             ply_name = Path(artifact_paths["point_cloud"]).name
+            duration_s = float(timestamps[-1]) if len(timestamps) else 0.0
 
             return {
                 "status": "done",
@@ -238,6 +265,10 @@ class KeplerPipeline:
                 # web function rewrites this to an absolute URL before returning.
                 "point_cloud_url": f"/artifacts/{request_id}/{ply_name}",
                 "point_cloud_request_id": request_id,
+                "frame_width": int(width),
+                "frame_height": int(height),
+                "fps": float(fps),
+                "duration_s": duration_s,
                 "error": None,
             }
         finally:

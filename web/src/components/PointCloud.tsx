@@ -46,7 +46,8 @@ const vertexShader = /* glsl */ `
     size *= breathe;
 
     // Clamp so nothing becomes a screen-clearing blob or vanishes.
-    size = clamp(size, 1.0, 32.0);
+    // Higher upper bound reads as denser / more volumetric.
+    size = clamp(size, 2.0, 48.0);
 
     gl_PointSize = size * uPixelRatio;
     gl_Position = projectionMatrix * mvPosition;
@@ -75,8 +76,8 @@ const fragmentShader = /* glsl */ `
 
 export function PointCloud({
   url,
-  baseSize = 0.012,
-  pulse = 0.08,
+  baseSize = 0.024,
+  pulse = 0.05,
 }: PointCloudProps) {
   const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
   const materialRef = useRef<THREE.ShaderMaterial | null>(null);

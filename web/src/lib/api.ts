@@ -14,6 +14,11 @@ export const API_BASE_URL: string =
 // Backwards-compat alias — some modules still import PIPELINE_URL.
 export const PIPELINE_URL: string = API_BASE_URL;
 
+// Separate deployment for ViewCrafter (yasbm-viewcrafter Modal app).
+// Optional — the button is hidden if this env var is not set.
+export const VIEWCRAFTER_URL: string | null =
+  (import.meta.env.VITE_VIEWCRAFTER_URL as string | undefined) ?? null;
+
 export type Vec3 = [number, number, number];
 
 export interface TrajectoryPoint {
@@ -25,6 +30,10 @@ export interface Track {
   track_id: number;
   label: string;
   points: TrajectoryPoint[];
+  /** Normalized (u, v) pixel positions in [0, 1] per frame. */
+  points_2d?: [number, number][] | null;
+  /** Per-frame σ for this specific track (aligned with `points`). */
+  sigma_per_frame?: number[] | null;
 }
 
 export interface Residual {
@@ -109,6 +118,46 @@ export async function verdictStream(
       }
     }
   }
+}
+
+export interface FlythroughResponse {
+  status: string;
+  flythrough_url: string;
+  request_id: string;
+  video_length: number;
+  ddim_steps: number;
+}
+
+/**
+ * POST a still image to the ViewCrafter deployment. Returns a URL to the
+ * generated 360° flythrough MP4. Takes ~60 s on a warm L4, ~3–4 min on a
+ * cold container (first request pays for weight download).
+ */
+export async function generateFlythrough(
+  frame: Blob,
+): Promise<FlythroughResponse> {
+  if (!VIEWCRAFTER_URL) {
+    throw new Error(
+      "ViewCrafter is not configured. Set VITE_VIEWCRAFTER_URL in web/.env.local.",
+    );
+  }
+  const form = new FormData();
+  form.append("image", frame, "frame.png");
+  const res = await fetch(`${VIEWCRAFTER_URL}/flythrough`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    let msg = `flythrough failed: ${res.status}`;
+    try {
+      const j = (await res.json()) as { detail?: string };
+      if (j.detail) msg = j.detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+  return (await res.json()) as FlythroughResponse;
 }
 
 export async function analyze(file: File): Promise<AnalyzeResponse> {

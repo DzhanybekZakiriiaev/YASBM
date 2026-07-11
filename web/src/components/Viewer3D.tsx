@@ -21,6 +21,8 @@ import { NoToneMapping, type Group, type PerspectiveCamera as PerspectiveCameraI
 import { useAnalysisStore } from "../state/analysis";
 import type { Track } from "../lib/api";
 import { PointCloud } from "./PointCloud";
+import { SceneMesh } from "./SceneMesh";
+import { TrackMarkers } from "./TrackMarkers";
 
 /** Emissive palette for trajectories — hot enough that Bloom picks them up
  *  at luminanceThreshold=0.3 while still reading as their intended colors. */
@@ -58,7 +60,10 @@ export function Viewer3D() {
           stencil: false,
         }}
       >
+        {/* Background is set by the <Environment> HDRI below; keep this
+            fallback so scenes without an HDRI aren't blinding white. */}
         <color attach="background" args={["#050505"]} />
+        <fog attach="fog" args={["#050505", 8, 42]} />
 
         <PerspectiveCamera makeDefault position={[3, 2, 4]} fov={45} />
 
@@ -76,8 +81,21 @@ export function Viewer3D() {
           color="#7fb8ff"
         />
 
-        {/* Subtle sheen from an HDRI without lighting the scene through it. */}
-        <Environment preset="city" environmentIntensity={0.35} background={false} />
+        {/* Environment HDRI acts as BOTH the light source (soft-picking up
+            highlights on the mesh) AND the visible backdrop when the user
+            orbits past the reconstruction. This is what stops the scene
+            from feeling like a cardboard cutout floating in a black void
+            — even without true AI gap-filling, there's now *something*
+            behind the mesh from every angle. `backgroundBlurriness=0.6`
+            softens it so it reads as "atmosphere" rather than "there's a
+            second scene behind the reconstruction". */}
+        <Environment
+          preset="apartment"
+          environmentIntensity={0.55}
+          background
+          backgroundBlurriness={0.55}
+          backgroundIntensity={0.35}
+        />
 
         <Grid
           infiniteGrid
@@ -130,7 +148,14 @@ function SceneContents({ tracks, pointCloudUrl }: SceneContentsProps) {
   return (
     <>
       <CinematicCamera tracks={tracks} />
-      {pointCloudUrl ? <PointCloud url={pointCloudUrl} /> : null}
+      {pointCloudUrl ? (
+        <>
+          {/* Rendered as a solid mesh when the PLY has faces; otherwise
+              the SceneMesh returns null and the PointCloud takes over. */}
+          <SceneMesh url={pointCloudUrl} />
+          <PointCloud url={pointCloudUrl} />
+        </>
+      ) : null}
       <group ref={groupRef}>
         {tracks.map((track, i) => (
           <TrackLine
@@ -140,6 +165,11 @@ function SceneContents({ tracks, pointCloudUrl }: SceneContentsProps) {
           />
         ))}
       </group>
+      {/* Animated per-frame track markers — colored spheres at each track's
+          current 3D position, scaled and coloured by σ. Peak-σ track glows
+          red so the physics violation is visible in space at the exact
+          timestamp you're scrubbed to. */}
+      <TrackMarkers tracks={tracks} />
     </>
   );
 }
@@ -211,14 +241,19 @@ function CinematicCamera({ tracks }: { tracks: Track[] }) {
     box.getCenter(center);
 
     // Fit the largest dimension into ~60% of vertical FOV, then push back
-    // by another 30% for breathing room.
+    // by another 60% so the trajectory has real breathing room *and* the
+    // reconstructed room around it is visible without any manual orbit.
     const maxDim = Math.max(size.x, size.y, size.z, 0.5);
     const fovRad = ((camera.fov ?? 45) * Math.PI) / 180;
     let distance = (maxDim / 2) / Math.tan(fovRad / 2);
-    distance *= 1.3; // breathing room
+    distance *= 1.6;
 
-    // Frame from a cinematic 3/4 angle: slightly high, slightly to the right.
-    const dir = new THREE.Vector3(0.9, 0.55, 1.0).normalize();
+    // Frame from a "director's chair" hero angle — behind the recording
+    // camera (small +X offset), high enough for a 30° top-down bite, and
+    // *closer* to Z=0 so we're clearly *behind* the phone that shot the
+    // scene, looking into it. This is the pose that makes 3D read as 3D
+    // without the user rotating anything.
+    const dir = new THREE.Vector3(0.35, 0.55, -0.75).normalize();
     const camPos = center.clone().addScaledVector(dir, distance);
 
     camera.position.copy(camPos);
