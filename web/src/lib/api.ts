@@ -70,6 +70,23 @@ export interface ObjectReport {
     | "morphing";
 }
 
+/**
+ * One 3D prop placement for a detected object. Backend resolves a GLB from
+ * Poly Pizza when possible (`glb_url` non-null); otherwise the client renders
+ * a procedural proxy. `position` is the CENTER of the object's 3D bbox in
+ * world metres (camera-at-origin frame), `scale` its approximate dims [w,h,d].
+ */
+export interface PropPlacement {
+  object_id: number;
+  label: string;
+  position: Vec3;
+  scale: Vec3;
+  yaw_deg: number;
+  glb_url: string | null;
+  source: string; // "polypizza" | "none"
+  crop_url: string | null;
+}
+
 export interface AnalyzeResponse {
   status: string;
   tracks: Track[];
@@ -84,7 +101,62 @@ export interface AnalyzeResponse {
   frame_height?: number | null;
   fps?: number | null;
   duration_s?: number | null;
+  props?: PropPlacement[] | null;
   error?: string | null;
+}
+
+/** Error carrying the HTTP status so callers can branch (e.g. 503). */
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+/**
+ * The analyze response has no request_id field today — but every artifact
+ * URL embeds it as the path segment after `/artifacts/`. Extract it from
+ * e.g. `https://host/artifacts/<request_id>/points.ply`.
+ */
+export function extractRequestId(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const m = /\/artifacts\/([^/?#]+)/.exec(url);
+  return m ? m[1] : null;
+}
+
+export interface HeroResponse {
+  status: string;
+  glb_url: string;
+}
+
+/**
+ * Ask the backend to generate a hero 3D asset (Tripo image-to-3D from the
+ * object's crop). Can take up to ~4 minutes — no timeout, just await.
+ * Throws ApiError with status 503 when Tripo is not configured.
+ */
+export async function generateHero(
+  requestId: string,
+  objectId: number,
+): Promise<HeroResponse> {
+  const res = await fetch(`${API_BASE_URL}/hero`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ request_id: requestId, object_id: objectId }),
+  });
+  if (!res.ok) {
+    let msg = `hero generation failed: ${res.status}`;
+    try {
+      const j = (await res.json()) as { detail?: string; error?: string };
+      if (j.detail) msg = j.detail;
+      else if (j.error) msg = j.error;
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(msg, res.status);
+  }
+  return (await res.json()) as HeroResponse;
 }
 
 export async function health(): Promise<{ status: string }> {

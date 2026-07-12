@@ -22,6 +22,7 @@ import { useAnalysisStore } from "../state/analysis";
 import type { Track } from "../lib/api";
 import { DynamicPoints } from "./DynamicPoints";
 import { PointCloud } from "./PointCloud";
+import { Props } from "./Props";
 import { SceneMesh } from "./SceneMesh";
 import { TrackMarkers } from "./TrackMarkers";
 
@@ -37,9 +38,12 @@ const TRACK_COLORS = [
 
 export function Viewer3D() {
   const analysisResult = useAnalysisStore((s) => s.analysisResult);
+  const showProps = useAnalysisStore((s) => s.showProps);
+  const toggleProps = useAnalysisStore((s) => s.toggleProps);
   const tracks = analysisResult?.tracks ?? [];
   const pointCloudUrl = analysisResult?.point_cloud_url ?? null;
   const dynamicPointsUrl = analysisResult?.dynamic_points_url ?? null;
+  const hasProps = (analysisResult?.props?.length ?? 0) > 0;
 
   return (
     <div className="relative h-[420px] w-full overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950">
@@ -47,6 +51,15 @@ export function Viewer3D() {
         3d scene · {tracks.length} track{tracks.length === 1 ? "" : "s"}
         {pointCloudUrl ? " · cloud" : ""}
       </div>
+      {hasProps ? (
+        <button
+          type="button"
+          onClick={toggleProps}
+          className="absolute bottom-3 left-3 z-10 rounded-md border border-neutral-800 bg-neutral-900/80 px-2 py-1 font-mono text-[10px] uppercase tracking-widest text-neutral-400 transition-colors hover:border-neutral-700 hover:bg-neutral-800 hover:text-neutral-200"
+        >
+          props: {showProps ? "on" : "off"}
+        </button>
+      ) : null}
       <Canvas
         dpr={[1, 2]}
         // Tone mapping is handled by the <ToneMapping> effect below. Setting
@@ -169,6 +182,8 @@ function SceneContents({
       ) : null}
       {/* Moving pixels re-rendered per frame, synced to the playhead. */}
       {dynamicPointsUrl ? <DynamicPoints url={dynamicPointsUrl} /> : null}
+      {/* Stylized 3D props at each detected object's bbox (GLB or proxy). */}
+      <Props />
       <group ref={groupRef}>
         {tracks.map((track, i) => (
           <TrackLine
@@ -218,69 +233,61 @@ function TrackLine({ track, color }: TrackLineProps) {
 }
 
 /**
- * Auto-frame the camera to the union bounding box of all trajectory points.
- * Runs once on mount and every time the tracks list changes identity.
- * Zooms out ~30% so the trajectory reads with breathing room.
+ * Spawn the viewer exactly at the recording camera's pose.
+ *
+ * The pipeline back-projects with a pinhole model: camera at the origin
+ * looking down +Z, focal length fx = frame_width. Reproducing that pose
+ * plus the matching vertical FOV (2·atan(H / 2W)) makes the depth mesh
+ * fill the viewport exactly like frame 0 of the video — no hunting for
+ * the angle where the projection "lines up". Orbit starts from there,
+ * pivoting around the scene's depth centroid.
  */
 function CinematicCamera({ tracks }: { tracks: Track[] }) {
   const camera = useThree((s) => s.camera) as PerspectiveCameraImpl;
   const controls = useThree((s) => s.controls) as
     | { target: THREE.Vector3; update: () => void }
     | null;
+  const frameWidth = useAnalysisStore(
+    (s) => s.analysisResult?.frame_width ?? null,
+  );
+  const frameHeight = useAnalysisStore(
+    (s) => s.analysisResult?.frame_height ?? null,
+  );
 
   useEffect(() => {
     if (!tracks.length) return;
 
-    const box = new THREE.Box3();
-    const tmp = new THREE.Vector3();
-    let empty = true;
+    // Median track depth = a robust "middle of the scene" for the orbit
+    // pivot. Track positions are already in the camera's world frame.
+    const zs: number[] = [];
     for (const track of tracks) {
-      for (const p of track.points) {
-        tmp.set(p.position[0], p.position[1], p.position[2]);
-        if (empty) {
-          box.min.copy(tmp);
-          box.max.copy(tmp);
-          empty = false;
-        } else {
-          box.expandByPoint(tmp);
-        }
-      }
+      for (const p of track.points) zs.push(p.position[2]);
     }
-    if (empty) return;
+    zs.sort((a, b) => a - b);
+    const zMid = zs.length ? zs[Math.floor(zs.length / 2)] : 3;
+    const target = new THREE.Vector3(0, 0, Math.max(zMid, 0.5));
 
-    const size = new THREE.Vector3();
-    const center = new THREE.Vector3();
-    box.getSize(size);
-    box.getCenter(center);
+    // Match the recording camera's intrinsics: fx = frame width, so the
+    // vertical FOV is 2·atan((H/2) / W). Falls back to 45° when the
+    // response predates the frame-dimension fields.
+    if (frameWidth && frameHeight) {
+      camera.fov =
+        (2 * Math.atan(frameHeight / (2 * frameWidth)) * 180) / Math.PI;
+    } else {
+      camera.fov = 45;
+    }
 
-    // Fit the largest dimension into ~60% of vertical FOV, then push back
-    // by another 60% so the trajectory has real breathing room *and* the
-    // reconstructed room around it is visible without any manual orbit.
-    const maxDim = Math.max(size.x, size.y, size.z, 0.5);
-    const fovRad = ((camera.fov ?? 45) * Math.PI) / 180;
-    let distance = (maxDim / 2) / Math.tan(fovRad / 2);
-    distance *= 1.6;
-
-    // Default view = the recording camera's own axis. The depth mesh is a
-    // projection from the original camera at the origin looking down +Z,
-    // so it only reads "correct" from near that axis — any big off-axis
-    // default forces the user to hunt for the right angle. We sit slightly
-    // behind the origin with a whisper of offset for depth parallax; the
-    // user can orbit from there.
-    const dir = new THREE.Vector3(0.12, 0.18, -1.0).normalize();
-    const camPos = center.clone().addScaledVector(dir, distance);
-
-    camera.position.copy(camPos);
-    camera.near = Math.max(0.01, distance * 0.01);
-    camera.far = Math.max(100, distance * 20);
-    camera.lookAt(center);
+    camera.position.set(0, 0, 0);
+    camera.near = 0.05;
+    camera.far = 200;
+    camera.lookAt(target);
     camera.updateProjectionMatrix();
 
     if (controls && "target" in controls) {
-      controls.target.copy(center);
+      controls.target.copy(target);
       controls.update();
     }
-  }, [tracks, camera, controls]);
+  }, [tracks, camera, controls, frameWidth, frameHeight]);
 
   return null;
 }

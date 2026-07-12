@@ -15,6 +15,8 @@ export interface AnalysisProgress {
 
 export type FlythroughStatus = "idle" | "generating" | "done" | "error";
 
+export type HeroStatus = "generating" | "done" | "error" | "unavailable";
+
 interface AnalysisState {
   videoFile: File | null;
   videoUrl: string | null;
@@ -27,6 +29,11 @@ interface AnalysisState {
   flythroughStatus: FlythroughStatus;
   flythroughUrl: string | null;
   flythroughError: string | null;
+  // 3D props state — procedural / GLB proxies placed in the scene.
+  showProps: boolean;
+  // Per-object hero (Tripo image-to-3D) generation state, keyed by object_id.
+  heroStatus: Record<number, HeroStatus>;
+  heroUrls: Record<number, string>;
   // Playhead — video's current time in seconds. Player pushes this in on
   // RVFC / timeupdate; Timeline reads it to render the scrubber head;
   // Viewer3D reads it to animate per-frame track markers.
@@ -44,6 +51,8 @@ interface AnalysisState {
   runAnalyze: () => Promise<void>;
   runFlythrough: (frame: Blob) => Promise<void>;
   clearFlythrough: () => void;
+  toggleProps: () => void;
+  runHero: (objectId: number) => Promise<void>;
   setCurrentTimeS: (t: number) => void;
   setDurationS: (t: number) => void;
   requestSeek: (t: number | null) => void;
@@ -60,6 +69,9 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
   flythroughStatus: "idle",
   flythroughUrl: null,
   flythroughError: null,
+  showProps: true,
+  heroStatus: {},
+  heroUrls: {},
   currentTimeS: 0,
   durationS: 0,
   seekRequestS: null,
@@ -78,6 +90,8 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
       flythroughStatus: "idle",
       flythroughUrl: null,
       flythroughError: null,
+      heroStatus: {},
+      heroUrls: {},
       currentTimeS: 0,
       durationS: 0,
       seekRequestS: null,
@@ -97,6 +111,9 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
       flythroughStatus: "idle",
       flythroughUrl: null,
       flythroughError: null,
+      showProps: true,
+      heroStatus: {},
+      heroUrls: {},
       currentTimeS: 0,
       durationS: 0,
       seekRequestS: null,
@@ -114,6 +131,8 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
       error: null,
       analysisResult: null,
       verdict: null,
+      heroStatus: {},
+      heroUrls: {},
     });
     try {
       const result = await api.analyze(file);
@@ -185,6 +204,41 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
       flythroughUrl: null,
       flythroughError: null,
     });
+  },
+  toggleProps: () => set((s) => ({ showProps: !s.showProps })),
+  runHero: async (objectId: number) => {
+    const result = get().analysisResult;
+    const requestId = api.extractRequestId(result?.point_cloud_url);
+    if (!requestId) {
+      set((s) => ({
+        heroStatus: { ...s.heroStatus, [objectId]: "error" },
+      }));
+      return;
+    }
+    set((s) => ({
+      heroStatus: { ...s.heroStatus, [objectId]: "generating" },
+    }));
+    try {
+      // Tripo image-to-3D can take up to ~4 minutes — no timeout, just await.
+      const res = await api.generateHero(requestId, objectId);
+      set((s) => ({
+        heroUrls: { ...s.heroUrls, [objectId]: res.glb_url },
+        heroStatus: { ...s.heroStatus, [objectId]: "done" },
+      }));
+    } catch (err) {
+      const unavailable =
+        err instanceof api.ApiError && err.status === 503;
+      if (!unavailable) {
+        // eslint-disable-next-line no-console
+        console.warn("hero generation failed:", err);
+      }
+      set((s) => ({
+        heroStatus: {
+          ...s.heroStatus,
+          [objectId]: unavailable ? "unavailable" : "error",
+        },
+      }));
+    }
   },
   setCurrentTimeS: (t) => set({ currentTimeS: t }),
   setDurationS: (t) => set({ durationS: t }),

@@ -35,6 +35,7 @@ from .stages.lift import lift as lift_stage
 from .stages.objects import objects as objects_stage
 from .stages.package import package as package_stage
 from .stages.physics import physics as physics_stage
+from .stages.props import props as props_stage
 from .stages.scene import build_exclude_masks
 from .stages.scene import scene as scene_stage
 from .stages.segment import segment as segment_stage
@@ -177,6 +178,16 @@ async def analyze(request: Request, video: UploadFile = File(...)) -> AnalyzeRes
         point_cloud_xyz = scene_out["xyz"]
         point_cloud_rgb = scene_out["rgb"]
 
+        # 3D prop placements + object crops (served via the /artifacts mount).
+        prop_placements = props_stage(
+            object_reports=object_reports,
+            depth_maps=depth_maps,
+            frames=frames,
+            frame_size=(width, height),
+            out_dir=request_artifacts,
+            request_id=request_id,
+        )
+
         artifact_paths = package_stage(
             point_cloud_xyz=point_cloud_xyz,
             tracks_3d=tracks_3d,
@@ -247,6 +258,14 @@ async def analyze(request: Request, video: UploadFile = File(...)) -> AnalyzeRes
         base_url = str(request.base_url).rstrip("/")
         point_cloud_url = f"{base_url}/artifacts/{request_id}/{ply_name}"
         dynamic_points_url = f"{base_url}/artifacts/{request_id}/dynamic.json"
+
+        # Prop crop URLs are relative /artifacts paths — prefix with the
+        # server base URL like point_cloud_url. Poly Pizza glb_url is
+        # already absolute.
+        for prop in prop_placements:
+            crop_url = prop.get("crop_url")
+            if isinstance(crop_url, str) and crop_url.startswith("/artifacts/"):
+                prop["crop_url"] = base_url + crop_url
         duration_s = float(timestamps[-1]) if len(timestamps) else 0.0
 
         eligible_sigmas = [
@@ -266,6 +285,7 @@ async def analyze(request: Request, video: UploadFile = File(...)) -> AnalyzeRes
             verdict_score=verdict_score,
             verdict_basis=verdict_basis,
             objects=object_reports,
+            props=prop_placements,
             max_morph_score=max(
                 (o["morph_score"] for o in object_reports), default=0.0
             ),

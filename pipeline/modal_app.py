@@ -19,6 +19,25 @@ module. FastAPI's Pydantic v2 type-adapter can't resolve string
 annotations for imports that live inside the ``def web()`` scope, so
 ``UploadFile`` degrades to an unresolvable ``ForwardRef`` and every
 POST /analyze returns 500 before the handler body runs.
+
+Secrets
+-------
+All API keys are read from the single existing Modal secret
+``kepler-anthropic`` (referencing a second, possibly-absent secret via
+``modal.Secret.from_name`` would fail the deploy when it doesn't exist).
+To enable the optional 3D-props integrations, add the extra keys to that
+same secret — note ``modal secret create`` REPLACES the secret, so pass
+every key at once::
+
+    modal secret create kepler-anthropic \
+        ANTHROPIC_API_KEY=sk-ant-... \
+        POLYPIZZA_API_KEY=...  \
+        TRIPO_API_KEY=tsk_...
+
+``POLYPIZZA_API_KEY`` (poly.pizza) resolves proxy GLB models for detected
+objects; ``TRIPO_API_KEY`` (tripo3d.ai) powers ``POST /hero`` photoreal
+image-to-3D generation. Both are optional: without them ``props`` still
+returns placements (``glb_url: null``) and ``/hero`` returns 503.
 """
 
 import base64
@@ -93,6 +112,10 @@ _VOLUMES = {
     "/artifacts": artifacts_vol,
 }
 
+# Single secret for ALL keys (ANTHROPIC_API_KEY + optional POLYPIZZA_API_KEY
+# / TRIPO_API_KEY) — see the module docstring for why and how to update it.
+anthropic_secret = modal.Secret.from_name("kepler-anthropic")
+
 
 # ---------------------------------------------------------------------------
 # Pipeline — warm-loaded model container
@@ -105,6 +128,8 @@ _VOLUMES = {
     volumes=_VOLUMES,
     timeout=600,
     scaledown_window=300,
+    # props() reads POLYPIZZA_API_KEY from the env inside this container.
+    secrets=[anthropic_secret],
 )
 class KeplerPipeline:
     @modal.enter()
@@ -135,6 +160,7 @@ class KeplerPipeline:
         from kepler_pipeline.stages.objects import objects as objects_stage
         from kepler_pipeline.stages.package import package as package_stage
         from kepler_pipeline.stages.physics import physics as physics_stage
+        from kepler_pipeline.stages.props import props as props_stage
         from kepler_pipeline.stages.scene import build_exclude_masks
         from kepler_pipeline.stages.scene import scene as scene_stage
         from kepler_pipeline.stages.track import track as track_stage
@@ -215,6 +241,18 @@ class KeplerPipeline:
             )
 
             out_dir = Path("/artifacts") / request_id
+
+            # 3D prop placements (+ object crops written under out_dir/crops
+            # BEFORE the volume commit below so the web container serves them).
+            prop_placements = props_stage(
+                object_reports=object_reports,
+                depth_maps=depth_maps,
+                frames=frames,
+                frame_size=(width, height),
+                out_dir=out_dir,
+                request_id=request_id,
+            )
+
             artifact_paths = package_stage(
                 point_cloud_xyz=scene_out["xyz"],
                 tracks_3d=tracks_3d,
@@ -317,6 +355,7 @@ class KeplerPipeline:
                 "verdict_score": verdict_score,
                 "verdict_basis": verdict_basis,
                 "objects": object_reports,
+                "props": prop_placements,
                 "max_morph_score": float(max_morph),
                 # web function rewrites these to absolute URLs before returning.
                 "point_cloud_url": f"/artifacts/{request_id}/{ply_name}",
@@ -355,7 +394,107 @@ Hard rules:
 Style: neutral forensic. 60-120 words. No markdown, no bullet points, no headers. One or two paragraphs. Do not restate these rules."""
 
 
-anthropic_secret = modal.Secret.from_name("kepler-anthropic")
+class TripoError(RuntimeError):
+    """Upstream Tripo API failure — surfaced to the client as HTTP 502."""
+
+
+def _tripo_image_to_glb(api_key: str, crop_path: Path, out_path: Path) -> None:
+    """Generate a textured GLB from ``crop_path`` via the Tripo
+    image-to-3D API and write it to ``out_path``.
+
+    Blocking (uses ``requests`` + polling) — call from a sync FastAPI
+    handler so it runs on the threadpool. Raises :class:`TripoError` on
+    any upstream failure; responses are parsed defensively and the raw
+    payload is printed so surprises are debuggable from ``modal logs``.
+    """
+
+    import time
+
+    import requests
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    # 1) Upload the crop → image token.
+    with crop_path.open("rb") as fh:
+        resp = requests.post(
+            "https://api.tripo3d.ai/v2/openapi/upload/sts",
+            headers=headers,
+            files={"file": (crop_path.name, fh, "image/png")},
+            timeout=60,
+        )
+    try:
+        payload = resp.json()
+    except ValueError:
+        payload = {}
+    print(f"[/hero] tripo upload status={resp.status_code} payload={payload}")
+    data = payload.get("data") or {}
+    image_token = data.get("image_token") or data.get("token")
+    if resp.status_code >= 400 or not image_token:
+        raise TripoError(f"Tripo upload failed (HTTP {resp.status_code}): {payload}")
+
+    # 2) Create the image_to_model task.
+    resp = requests.post(
+        "https://api.tripo3d.ai/v2/openapi/task",
+        headers=headers,
+        json={
+            "type": "image_to_model",
+            "file": {"type": "png", "file_token": image_token},
+        },
+        timeout=60,
+    )
+    try:
+        payload = resp.json()
+    except ValueError:
+        payload = {}
+    print(f"[/hero] tripo task-create status={resp.status_code} payload={payload}")
+    task_id = (payload.get("data") or {}).get("task_id")
+    if resp.status_code >= 400 or not task_id:
+        raise TripoError(f"Tripo task creation failed (HTTP {resp.status_code}): {payload}")
+
+    # 3) Poll until success (5 s cadence, 240 s budget).
+    deadline = time.monotonic() + 240
+    glb_url = None
+    while time.monotonic() < deadline:
+        resp = requests.get(
+            f"https://api.tripo3d.ai/v2/openapi/task/{task_id}",
+            headers=headers,
+            timeout=30,
+        )
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = {}
+        data = payload.get("data") or {}
+        status = data.get("status")
+        if status == "success":
+            # GLB URL location varies across API versions — read both shapes.
+            output = data.get("output") or {}
+            glb_url = output.get("pbr_model") or output.get("model")
+            if isinstance(glb_url, dict):
+                glb_url = glb_url.get("url")
+            if not glb_url:
+                result = data.get("result") or {}
+                candidate = result.get("pbr_model") or result.get("model")
+                if isinstance(candidate, dict):
+                    candidate = candidate.get("url")
+                glb_url = candidate
+            if not isinstance(glb_url, str) or not glb_url.startswith("http"):
+                print(f"[/hero] tripo success but no model url, payload={payload}")
+                raise TripoError(f"Tripo task succeeded but returned no model URL: {payload}")
+            break
+        if status in ("failed", "cancelled", "banned", "expired", "unknown"):
+            print(f"[/hero] tripo task ended status={status} payload={payload}")
+            raise TripoError(f"Tripo task ended with status '{status}': {payload}")
+        time.sleep(5)
+    if glb_url is None:
+        raise TripoError("Tripo task did not finish within 240 s")
+
+    # 4) Download the GLB into the artifacts volume.
+    resp = requests.get(glb_url, timeout=120)
+    if resp.status_code >= 400 or not resp.content:
+        raise TripoError(f"GLB download failed (HTTP {resp.status_code}) from {glb_url}")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(resp.content)
 
 
 @app.function(
@@ -440,6 +579,12 @@ def web():
             for key in ("point_cloud_url", "dynamic_points_url"):
                 if result.get(key, "").startswith("/artifacts/"):
                     result[key] = base_url + result[key]
+            # Prop crop URLs are relative /artifacts paths too. glb_url
+            # (Poly Pizza) is already absolute — leave it alone.
+            for prop in result.get("props") or []:
+                crop_url = prop.get("crop_url")
+                if isinstance(crop_url, str) and crop_url.startswith("/artifacts/"):
+                    prop["crop_url"] = base_url + crop_url
 
             return result
         except Exception as exc:
@@ -447,6 +592,70 @@ def web():
 
             tb = traceback.format_exc()
             print(f"[/analyze] error: {exc}\n{tb}")
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "detail": f"{type(exc).__name__}: {exc}",
+                    "traceback": tb.splitlines()[-10:],
+                },
+            )
+
+    class HeroRequest(BaseModel):
+        request_id: str
+        object_id: int
+
+    @api.post("/hero")
+    def hero(body: HeroRequest, request: Request):
+        """Generate a photoreal textured GLB for one detected object.
+
+        Reads the crop saved by the props stage, runs Tripo image-to-3D,
+        stores the GLB in the artifacts volume and returns its URL. Sync
+        handler on purpose: the Tripo flow blocks (polls up to 240 s), so
+        FastAPI runs it on the threadpool instead of the event loop.
+        """
+
+        import os
+
+        try:
+            api_key = os.environ.get("TRIPO_API_KEY")
+            if not api_key:
+                return JSONResponse(
+                    status_code=503,
+                    content={"detail": "TRIPO_API_KEY not configured"},
+                )
+
+            # Reload so this container sees crops the GPU container wrote.
+            artifacts_vol.reload()
+            crop_rel = f"/artifacts/{body.request_id}/crops/{body.object_id}.png"
+            crop_path = (
+                Path("/artifacts") / body.request_id / "crops" / f"{body.object_id}.png"
+            )
+            if not crop_path.exists():
+                return JSONResponse(
+                    status_code=404,
+                    content={"detail": f"crop not found: {crop_rel}"},
+                )
+
+            glb_rel = f"/artifacts/{body.request_id}/hero_{body.object_id}.glb"
+            out_path = Path("/artifacts") / body.request_id / f"hero_{body.object_id}.glb"
+            try:
+                _tripo_image_to_glb(api_key, crop_path, out_path)
+            except TripoError as exc:
+                print(f"[/hero] tripo error: {exc}")
+                return JSONResponse(status_code=502, content={"detail": str(exc)})
+            artifacts_vol.commit()
+
+            base_url = str(request.base_url).rstrip("/")
+            return {
+                "status": "done",
+                "glb_url": base_url + glb_rel,
+                "crop_url": base_url + crop_rel,
+            }
+        except Exception as exc:
+            import traceback
+
+            tb = traceback.format_exc()
+            print(f"[/hero] error: {exc}\n{tb}")
             return JSONResponse(
                 status_code=500,
                 content={

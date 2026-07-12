@@ -79,6 +79,26 @@ class ObjectReport(BaseModel):
     verdict: str
 
 
+class PropPlacement(BaseModel):
+    """3D placement for one detected object so the frontend can drop a
+    proxy (or Poly Pizza / Tripo) model into the reconstructed scene."""
+
+    object_id: int
+    label: str
+    # World metres; CENTER of the object's 3D bounding box.
+    position: Vec3
+    # Approximate bbox dims in metres: (sx width, sy height, sz depth).
+    scale: Vec3
+    yaw_deg: float = 0.0
+    # Absolute GLB URL when Poly Pizza resolved a model, else None.
+    glb_url: str | None = None
+    # "polypizza" when glb_url is set, else "none".
+    source: str = "none"
+    # "/artifacts/<request_id>/crops/<object_id>.png" when a crop was saved
+    # (rewritten to an absolute URL by the web layer), else None.
+    crop_url: str | None = None
+
+
 class AnalyzeResponse(BaseModel):
     """Top-level payload returned by ``POST /analyze``."""
 
@@ -93,6 +113,7 @@ class AnalyzeResponse(BaseModel):
     # "grid_fallback" when no recognizable object was found.
     verdict_basis: str | None = None
     objects: list[ObjectReport] = Field(default_factory=list)
+    props: list[PropPlacement] = Field(default_factory=list)
     max_morph_score: float = 0.0
     point_cloud_url: str | None = None
     dynamic_points_url: str | None = None
