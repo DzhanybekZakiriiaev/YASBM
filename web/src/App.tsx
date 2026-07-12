@@ -4,6 +4,7 @@ import { Player } from "./components/Player";
 import { Viewer3D } from "./components/Viewer3D";
 import { Timeline } from "./components/Timeline";
 import { Verdict } from "./components/Verdict";
+import { ObjectList } from "./components/ObjectList";
 import { FlythroughButton } from "./components/FlythroughButton";
 
 export default function App() {
@@ -39,6 +40,7 @@ export default function App() {
             the 3D scene's animated track markers, so hovering a peak σ
             frame instantly reveals the offending object in 3D. */}
         <Timeline />
+        <ObjectList />
         <Verdict />
       </main>
     </div>

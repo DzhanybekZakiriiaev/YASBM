@@ -53,6 +53,32 @@ class AnalyzeStatus(str, Enum):
     error = "error"
 
 
+class BallisticAudit(BaseModel):
+    """Per-object ballistic fit summary."""
+
+    eligible: bool
+    reason: str
+    sigma: float
+
+
+class ObjectReport(BaseModel):
+    """One detected + audited object (YOLO class, cross-frame identity)."""
+
+    object_id: int
+    label: str
+    frames_present: int
+    member_track_ids: list[int]
+    # frame index (str key) -> [x0, y0, x1, y1] normalized to [0, 1]
+    boxes_norm: dict[str, list[float]]
+    ballistic: BallisticAudit
+    morph_score: float
+    class_flicker: float
+    rigidity_cv: float
+    box_jerk: float
+    # consistent | borderline | implausible | agent | static | morphing
+    verdict: str
+
+
 class AnalyzeResponse(BaseModel):
     """Top-level payload returned by ``POST /analyze``."""
 
@@ -63,7 +89,13 @@ class AnalyzeResponse(BaseModel):
         ...,
         description="Peak physics-violation sigma. Higher = more likely fake.",
     )
+    # "objects" when the score comes from eligible detected objects,
+    # "grid_fallback" when no recognizable object was found.
+    verdict_basis: str | None = None
+    objects: list[ObjectReport] = Field(default_factory=list)
+    max_morph_score: float = 0.0
     point_cloud_url: str | None = None
+    dynamic_points_url: str | None = None
     error: str | None = None
     # Video source dimensions in pixels. Frontend uses this only if it wants
     # to un-normalize 2D positions — the normalized coordinates work as-is

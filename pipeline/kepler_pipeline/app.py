@@ -32,6 +32,7 @@ from .schema import (
 )
 from .stages.depth import depth as depth_stage
 from .stages.lift import lift as lift_stage
+from .stages.objects import objects as objects_stage
 from .stages.package import package as package_stage
 from .stages.physics import physics as physics_stage
 from .stages.scene import scene as scene_stage
@@ -153,6 +154,13 @@ async def analyze(request: Request, video: UploadFile = File(...)) -> AnalyzeRes
 
         physics_out = physics_stage(tracks_3d, timestamps)
 
+        object_reports = objects_stage(
+            frames=frames,
+            tracks_2d=tracks_2d,
+            tracks_3d=tracks_3d,
+            timestamps=timestamps,
+        )
+
         artifact_paths = package_stage(
             point_cloud_xyz=point_cloud_xyz,
             tracks_3d=tracks_3d,
@@ -161,6 +169,7 @@ async def analyze(request: Request, video: UploadFile = File(...)) -> AnalyzeRes
             out_dir=request_artifacts,
             point_cloud_rgb=point_cloud_rgb,
             point_cloud_faces=scene_out.get("faces"),
+            dynamic_points=scene_out.get("dynamic"),
         )
 
         # Normalized 2D pixel positions (u, v) in [0, 1] per track per frame.
@@ -221,14 +230,31 @@ async def analyze(request: Request, video: UploadFile = File(...)) -> AnalyzeRes
         ply_name = Path(artifact_paths["point_cloud"]).name
         base_url = str(request.base_url).rstrip("/")
         point_cloud_url = f"{base_url}/artifacts/{request_id}/{ply_name}"
+        dynamic_points_url = f"{base_url}/artifacts/{request_id}/dynamic.json"
         duration_s = float(timestamps[-1]) if len(timestamps) else 0.0
+
+        eligible_sigmas = [
+            o["ballistic"]["sigma"] for o in object_reports if o["ballistic"]["eligible"]
+        ]
+        if eligible_sigmas:
+            verdict_score = float(max(eligible_sigmas))
+            verdict_basis = "objects"
+        else:
+            verdict_score = peak_sigma
+            verdict_basis = "grid_fallback"
 
         return AnalyzeResponse(
             status=AnalyzeStatus.done,
             tracks=response_tracks,
             residuals=response_residuals,
-            verdict_score=peak_sigma,
+            verdict_score=verdict_score,
+            verdict_basis=verdict_basis,
+            objects=object_reports,
+            max_morph_score=max(
+                (o["morph_score"] for o in object_reports), default=0.0
+            ),
             point_cloud_url=point_cloud_url,
+            dynamic_points_url=dynamic_points_url,
             error=None,
             frame_width=int(width),
             frame_height=int(height),

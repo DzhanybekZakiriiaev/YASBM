@@ -133,6 +133,15 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
           {
             verdict_score: result.verdict_score,
             residuals: result.residuals,
+            clip_duration_s: result.duration_s ?? undefined,
+            verdict_basis: result.verdict_basis ?? undefined,
+            objects: (result.objects ?? []).map((o) => ({
+              label: o.label,
+              verdict: o.verdict,
+              sigma: o.ballistic.sigma,
+              morph_score: o.morph_score,
+              reason: o.ballistic.reason,
+            })),
           },
           (chunk) => {
             accumulated += chunk;

@@ -42,12 +42,48 @@ export interface Residual {
   sigma: number;
 }
 
+export interface BallisticAudit {
+  eligible: boolean;
+  reason: string;
+  sigma: number;
+}
+
+/** One detected + audited object (YOLO class, tracked across frames). */
+export interface ObjectReport {
+  object_id: number;
+  label: string;
+  frames_present: number;
+  member_track_ids: number[];
+  /** frame index (string key) -> [x0, y0, x1, y1] normalized to [0,1] */
+  boxes_norm: Record<string, [number, number, number, number]>;
+  ballistic: BallisticAudit;
+  morph_score: number;
+  class_flicker: number;
+  rigidity_cv: number;
+  box_jerk: number;
+  verdict:
+    | "consistent"
+    | "borderline"
+    | "implausible"
+    | "agent"
+    | "static"
+    | "morphing";
+}
+
 export interface AnalyzeResponse {
   status: string;
   tracks: Track[];
   residuals: Residual[];
   verdict_score: number;
+  verdict_basis?: "objects" | "grid_fallback" | null;
+  objects?: ObjectReport[];
+  max_morph_score?: number;
   point_cloud_url: string | null;
+  dynamic_points_url?: string | null;
+  frame_width?: number | null;
+  frame_height?: number | null;
+  fps?: number | null;
+  duration_s?: number | null;
   error?: string | null;
 }
 
@@ -57,10 +93,20 @@ export async function health(): Promise<{ status: string }> {
   return (await res.json()) as { status: string };
 }
 
+export interface VerdictObjectSummary {
+  label: string;
+  verdict: string;
+  sigma: number;
+  morph_score: number;
+  reason: string;
+}
+
 export interface VerdictRequest {
   verdict_score: number;
   residuals: Residual[];
   clip_duration_s?: number;
+  verdict_basis?: string;
+  objects?: VerdictObjectSummary[];
 }
 
 /**

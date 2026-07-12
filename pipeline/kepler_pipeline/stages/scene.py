@@ -28,6 +28,12 @@ class SceneOutput(TypedDict):
     # is disabled or degenerates. Enables rendering the scene as a solid
     # mesh instead of a sparse point cloud.
     faces: np.ndarray
+    # Per-frame dynamic (moving-pixel) point clouds. One entry per frame:
+    # {"xyz": (K, 3) float32, "rgb": (K, 3) uint8}, K capped per frame.
+    # These are the pixels excluded from the static mesh — the browser
+    # renders the entry matching the playhead so moving objects scrub
+    # through 3D space in sync with the video timeline.
+    dynamic: list
 
 
 def _default_intrinsics(width: int, height: int) -> np.ndarray:
@@ -71,6 +77,8 @@ def scene(
             camera_poses=np.zeros((0, 4, 4), dtype=np.float32),
             xyz=np.zeros((0, 3), dtype=np.float32),
             rgb=np.zeros((0, 3), dtype=np.uint8),
+            faces=np.zeros((0, 3), dtype=np.int32),
+            dynamic=[],
         )
 
     identity = np.broadcast_to(np.eye(4, dtype=np.float32), (t, 4, 4)).copy()
@@ -87,6 +95,7 @@ def scene(
             xyz=xyz,
             rgb=rgb,
             faces=np.zeros((0, 3), dtype=np.int32),
+            dynamic=[],
         )
 
     # Median depth across frames — robust to moving objects. If a person
@@ -139,7 +148,62 @@ def scene(
         xyz_grid, n_rows, n_cols, static_grid=is_static_grid
     )
 
-    return SceneOutput(camera_poses=identity, xyz=xyz, rgb=rgb, faces=faces)
+    dynamic = _dynamic_points_per_frame(
+        frames=frames,
+        depth_stack=depth_stack,
+        static_mask=static_mask,
+        fx=fx,
+        fy=fy,
+        cx=cx,
+        cy=cy,
+        max_points_per_frame=2_500,
+    )
+
+    return SceneOutput(
+        camera_poses=identity, xyz=xyz, rgb=rgb, faces=faces, dynamic=dynamic
+    )
+
+
+def _dynamic_points_per_frame(
+    frames: list[np.ndarray],
+    depth_stack: np.ndarray,
+    static_mask: np.ndarray,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    max_points_per_frame: int = 2_500,
+) -> list[dict]:
+    """Back-project each frame's *moving* pixels through that frame's depth.
+
+    Moving pixels = the complement of the static mask. Sampled at a stride
+    that keeps each frame under ``max_points_per_frame`` so the browser
+    payload stays lean (~30 frames × 2.5k pts ≈ manageable JSON).
+    """
+
+    moving_mask = ~static_mask
+    n_moving = int(moving_mask.sum())
+    out: list[dict] = []
+
+    if n_moving == 0:
+        return [
+            {"xyz": np.zeros((0, 3), np.float32), "rgb": np.zeros((0, 3), np.uint8)}
+            for _ in frames
+        ]
+
+    vs, us = np.nonzero(moving_mask)
+    stride = max(1, int(np.ceil(n_moving / max_points_per_frame)))
+    vs, us = vs[::stride], us[::stride]
+
+    for f_idx, frame in enumerate(frames):
+        z = depth_stack[f_idx, vs, us].astype(np.float32)
+        x = (us - cx) * z / fx
+        y = -(vs - cy) * z / fy
+        xyz = np.stack([x, y, z], axis=1).astype(np.float32)
+        rgb = frame[vs, us].astype(np.uint8)
+        out.append({"xyz": xyz, "rgb": rgb})
+
+    return out
 
 
 def _build_edge_filtered_faces(

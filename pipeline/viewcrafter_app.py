@@ -318,7 +318,6 @@ class ViewCrafterPipeline:
     image=viewcrafter_image,
     volumes=_VOLUMES,
     timeout=900,
-    min_containers=1,
 )
 @modal.asgi_app()
 def web():

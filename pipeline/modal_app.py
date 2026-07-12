@@ -63,6 +63,8 @@ image = (
         "pydantic>=2.9",
         "huggingface_hub",
         "anthropic>=0.34",
+        # Object detection for the object-centric audit (objects.py stage).
+        "ultralytics>=8.3",
     )
     .pip_install(
         "git+https://github.com/facebookresearch/co-tracker.git@main",
@@ -111,10 +113,12 @@ class KeplerPipeline:
         request pays only inference cost."""
 
         from kepler_pipeline.stages import depth as depth_stage
+        from kepler_pipeline.stages import objects as objects_stage
         from kepler_pipeline.stages import track as track_stage
 
         track_stage.prefetch()
         depth_stage.prefetch()
+        objects_stage.prefetch()
 
     @modal.method()
     def analyze_bytes(
@@ -128,6 +132,7 @@ class KeplerPipeline:
 
         from kepler_pipeline.stages.depth import depth as depth_stage
         from kepler_pipeline.stages.lift import lift as lift_stage
+        from kepler_pipeline.stages.objects import objects as objects_stage
         from kepler_pipeline.stages.package import package as package_stage
         from kepler_pipeline.stages.physics import physics as physics_stage
         from kepler_pipeline.stages.scene import scene as scene_stage
@@ -182,6 +187,15 @@ class KeplerPipeline:
             )
             physics_out = physics_stage(tracks_3d, timestamps)
 
+            # Object-centric audit: named objects, per-object ballistic
+            # verdicts (self-propelled classes exempt), morph scores.
+            object_reports = objects_stage(
+                frames=frames,
+                tracks_2d=tracks_2d,
+                tracks_3d=tracks_3d,
+                timestamps=timestamps,
+            )
+
             out_dir = Path("/artifacts") / request_id
             artifact_paths = package_stage(
                 point_cloud_xyz=scene_out["xyz"],
@@ -191,6 +205,7 @@ class KeplerPipeline:
                 out_dir=out_dir,
                 point_cloud_rgb=scene_out["rgb"],
                 point_cloud_faces=scene_out.get("faces"),
+                dynamic_points=scene_out.get("dynamic"),
             )
             # Make writes visible to the web container.
             artifacts_vol.commit()
@@ -257,13 +272,37 @@ class KeplerPipeline:
             ply_name = Path(artifact_paths["point_cloud"]).name
             duration_s = float(timestamps[-1]) if len(timestamps) else 0.0
 
+            # Verdict policy: when recognizable objects exist, the score is
+            # the max σ over *eligible* objects (rigid + moving). Blind grid
+            # tracks sitting on walls no longer manufacture false positives.
+            # Without any recognizable object we fall back to the grid-level
+            # peak sigma but note the low confidence for the LLM verdict.
+            eligible_sigmas = [
+                o["ballistic"]["sigma"]
+                for o in object_reports
+                if o["ballistic"]["eligible"]
+            ]
+            if eligible_sigmas:
+                verdict_score = float(max(eligible_sigmas))
+                verdict_basis = "objects"
+            else:
+                verdict_score = float(physics_out.get("peak_sigma", 0.0))
+                verdict_basis = "grid_fallback"
+            max_morph = max(
+                (o["morph_score"] for o in object_reports), default=0.0
+            )
+
             return {
                 "status": "done",
                 "tracks": response_tracks,
                 "residuals": response_residuals,
-                "verdict_score": float(physics_out.get("peak_sigma", 0.0)),
-                # web function rewrites this to an absolute URL before returning.
+                "verdict_score": verdict_score,
+                "verdict_basis": verdict_basis,
+                "objects": object_reports,
+                "max_morph_score": float(max_morph),
+                # web function rewrites these to absolute URLs before returning.
                 "point_cloud_url": f"/artifacts/{request_id}/{ply_name}",
+                "dynamic_points_url": f"/artifacts/{request_id}/dynamic.json",
                 "point_cloud_request_id": request_id,
                 "frame_width": int(width),
                 "frame_height": int(height),
@@ -292,6 +331,8 @@ Hard rules:
    - "Physically implausible" if verdict_score >= 10
 3. Cite the specific peak sigma value, the frame time it occurred at, and the max delta in metres.
 4. Enumerate 2-3 alternative explanations for any flagged violation with probability language ("more likely / possible / unlikely"). Reasonable candidates: an off-camera contact force, a hidden support (wire, magnet, rig), an occluded interaction, a rolling-shutter or motion-blur artefact, an unmodelled aerodynamic effect, a depth-estimation error.
+5. If per-object reports are provided, ground the verdict in them: name the objects by their detected labels. Self-propelled objects (persons, vehicles, animals) are EXEMPT from the ballistic check — never cite their trajectory as a violation. If an object's morph_score exceeds 0.6, report a shape-consistency violation ("the object's detected identity or rigid geometry is unstable over time"), which is a separate, strong anomaly signal independent of trajectory physics.
+6. If verdict_basis is "grid_fallback", state that no recognizable free-flight object was found and the confidence of the trajectory audit is reduced.
 
 Style: neutral forensic. 60-120 words. No markdown, no bullet points, no headers. One or two paragraphs. Do not restate these rules."""
 
@@ -304,7 +345,9 @@ anthropic_secret = modal.Secret.from_name("kepler-anthropic")
     volumes=_VOLUMES,
     timeout=600,
     secrets=[anthropic_secret],
-    min_containers=1,
+    # NOTE: no min_containers here. A permanently-warm container bills 24/7
+    # and drained the workspace credit once already. For demo day, flip
+    # min_containers=1 on ~30 min before, remove right after.
 )
 @modal.asgi_app()
 def web():
@@ -376,8 +419,9 @@ def web():
             )
 
             base_url = str(request.base_url).rstrip("/")
-            if result.get("point_cloud_url", "").startswith("/artifacts/"):
-                result["point_cloud_url"] = base_url + result["point_cloud_url"]
+            for key in ("point_cloud_url", "dynamic_points_url"):
+                if result.get(key, "").startswith("/artifacts/"):
+                    result[key] = base_url + result[key]
 
             return result
         except Exception as exc:
@@ -398,10 +442,19 @@ def web():
         delta_m: float
         sigma: float
 
+    class _ObjectIn(BaseModel):
+        label: str
+        verdict: str
+        sigma: float = 0.0
+        morph_score: float = 0.0
+        reason: str = ""
+
     class VerdictRequest(BaseModel):
         verdict_score: float
         residuals: list[_ResidualIn]
         clip_duration_s: float | None = None
+        verdict_basis: str | None = None
+        objects: list[_ObjectIn] | None = None
 
     @api.post("/verdict")
     async def verdict(body: VerdictRequest):
@@ -453,6 +506,15 @@ def web():
             )
         if body.clip_duration_s is not None:
             user_msg_parts.append(f"clip duration: {body.clip_duration_s:.2f}s")
+        if body.verdict_basis:
+            user_msg_parts.append(f"verdict_basis: {body.verdict_basis}")
+        if body.objects:
+            obj_lines = "; ".join(
+                f"{o.label} [verdict={o.verdict}, sigma={o.sigma:.2f}, "
+                f"morph={o.morph_score:.2f}, note={o.reason or 'n/a'}]"
+                for o in body.objects[:8]
+            )
+            user_msg_parts.append(f"detected objects: {obj_lines}")
         user_msg_parts.append(
             "residual samples (t_s, delta_m, sigma): "
             + ", ".join(

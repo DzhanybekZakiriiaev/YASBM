@@ -79,6 +79,7 @@ def package(
     out_dir: Path,
     point_cloud_rgb: np.ndarray | None = None,
     point_cloud_faces: np.ndarray | None = None,
+    dynamic_points: list | None = None,
 ) -> dict[str, str]:
     """Serialise pipeline outputs into ``out_dir``.
 
@@ -111,6 +112,7 @@ def package(
     ply_path = out_dir / "point_cloud.ply"
     tracks_path = out_dir / "tracks.json"
     residuals_path = out_dir / "residuals.json"
+    dynamic_path = out_dir / "dynamic.json"
 
     _write_ascii_ply(
         point_cloud_xyz, point_cloud_rgb, point_cloud_faces, ply_path
@@ -181,8 +183,25 @@ def package(
     with residuals_path.open("w", encoding="utf-8") as fh:
         json.dump(residuals_payload, fh, indent=2)
 
+    # Dynamic per-frame moving points → flat arrays, 3-decimal rounding.
+    # Format: {"frames": [{"p": [x,y,z,...], "c": [r,g,b,...]}, ...]}
+    dynamic_payload: list[dict] = []
+    if dynamic_points:
+        for entry in dynamic_points:
+            xyz = np.asarray(entry["xyz"], dtype=np.float64).reshape(-1, 3)
+            rgb = np.asarray(entry["rgb"], dtype=np.int64).reshape(-1, 3)
+            dynamic_payload.append(
+                {
+                    "p": [round(float(v), 3) for v in xyz.ravel()],
+                    "c": [int(v) for v in rgb.ravel()],
+                }
+            )
+    with dynamic_path.open("w", encoding="utf-8") as fh:
+        json.dump({"frames": dynamic_payload}, fh, separators=(",", ":"))
+
     return {
         "point_cloud": ply_path.as_posix(),
         "tracks": tracks_path.as_posix(),
         "residuals": residuals_path.as_posix(),
+        "dynamic": dynamic_path.as_posix(),
     }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAnalysisStore } from "../state/analysis";
+import { VideoOverlay } from "./VideoOverlay";
 
 type RVFCVideoElement = HTMLVideoElement & {
   requestVideoFrameCallback?: (
@@ -94,6 +95,7 @@ export function Player() {
           className="h-full w-full"
           playsInline
         />
+        <VideoOverlay />
       </div>
       <div className="flex items-center gap-4 font-mono text-xs text-neutral-400">
         <button

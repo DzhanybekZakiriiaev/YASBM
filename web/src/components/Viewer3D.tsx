@@ -20,6 +20,7 @@ import * as THREE from "three";
 import { NoToneMapping, type Group, type PerspectiveCamera as PerspectiveCameraImpl } from "three";
 import { useAnalysisStore } from "../state/analysis";
 import type { Track } from "../lib/api";
+import { DynamicPoints } from "./DynamicPoints";
 import { PointCloud } from "./PointCloud";
 import { SceneMesh } from "./SceneMesh";
 import { TrackMarkers } from "./TrackMarkers";
@@ -38,6 +39,7 @@ export function Viewer3D() {
   const analysisResult = useAnalysisStore((s) => s.analysisResult);
   const tracks = analysisResult?.tracks ?? [];
   const pointCloudUrl = analysisResult?.point_cloud_url ?? null;
+  const dynamicPointsUrl = analysisResult?.dynamic_points_url ?? null;
 
   return (
     <div className="relative h-[420px] w-full overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950">
@@ -109,7 +111,11 @@ export function Viewer3D() {
           fadeStrength={1.2}
         />
 
-        <SceneContents tracks={tracks} pointCloudUrl={pointCloudUrl} />
+        <SceneContents
+          tracks={tracks}
+          pointCloudUrl={pointCloudUrl}
+          dynamicPointsUrl={dynamicPointsUrl}
+        />
 
         <OrbitControls makeDefault enableDamping dampingFactor={0.08} />
         <GizmoHelper alignment="top-right" margin={[64, 64]}>
@@ -140,9 +146,14 @@ export function Viewer3D() {
 interface SceneContentsProps {
   tracks: Track[];
   pointCloudUrl: string | null;
+  dynamicPointsUrl: string | null;
 }
 
-function SceneContents({ tracks, pointCloudUrl }: SceneContentsProps) {
+function SceneContents({
+  tracks,
+  pointCloudUrl,
+  dynamicPointsUrl,
+}: SceneContentsProps) {
   const groupRef = useRef<Group>(null);
 
   return (
@@ -156,6 +167,8 @@ function SceneContents({ tracks, pointCloudUrl }: SceneContentsProps) {
           <PointCloud url={pointCloudUrl} />
         </>
       ) : null}
+      {/* Moving pixels re-rendered per frame, synced to the playhead. */}
+      {dynamicPointsUrl ? <DynamicPoints url={dynamicPointsUrl} /> : null}
       <group ref={groupRef}>
         {tracks.map((track, i) => (
           <TrackLine
@@ -248,12 +261,13 @@ function CinematicCamera({ tracks }: { tracks: Track[] }) {
     let distance = (maxDim / 2) / Math.tan(fovRad / 2);
     distance *= 1.6;
 
-    // Frame from a "director's chair" hero angle — behind the recording
-    // camera (small +X offset), high enough for a 30° top-down bite, and
-    // *closer* to Z=0 so we're clearly *behind* the phone that shot the
-    // scene, looking into it. This is the pose that makes 3D read as 3D
-    // without the user rotating anything.
-    const dir = new THREE.Vector3(0.35, 0.55, -0.75).normalize();
+    // Default view = the recording camera's own axis. The depth mesh is a
+    // projection from the original camera at the origin looking down +Z,
+    // so it only reads "correct" from near that axis — any big off-axis
+    // default forces the user to hunt for the right angle. We sit slightly
+    // behind the origin with a whisper of offset for depth parallax; the
+    // user can orbit from there.
+    const dir = new THREE.Vector3(0.12, 0.18, -1.0).normalize();
     const camPos = center.clone().addScaledVector(dir, distance);
 
     camera.position.copy(camPos);
