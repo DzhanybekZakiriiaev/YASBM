@@ -96,20 +96,13 @@ export function Viewer3D() {
           color="#7fb8ff"
         />
 
-        {/* Environment HDRI acts as BOTH the light source (soft-picking up
-            highlights on the mesh) AND the visible backdrop when the user
-            orbits past the reconstruction. This is what stops the scene
-            from feeling like a cardboard cutout floating in a black void
-            — even without true AI gap-filling, there's now *something*
-            behind the mesh from every angle. `backgroundBlurriness=0.6`
-            softens it so it reads as "atmosphere" rather than "there's a
-            second scene behind the reconstruction". */}
+        {/* HDRI for material sheen ONLY — as a visible background it washed
+            the whole scene out white and destroyed the mesh's contrast.
+            Dark void + fog reads better for a forensic viewer. */}
         <Environment
           preset="apartment"
-          environmentIntensity={0.55}
-          background
-          backgroundBlurriness={0.55}
-          backgroundIntensity={0.35}
+          environmentIntensity={0.45}
+          background={false}
         />
 
         <Grid
