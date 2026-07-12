@@ -135,6 +135,7 @@ class KeplerPipeline:
         from kepler_pipeline.stages.objects import objects as objects_stage
         from kepler_pipeline.stages.package import package as package_stage
         from kepler_pipeline.stages.physics import physics as physics_stage
+        from kepler_pipeline.stages.scene import build_exclude_masks
         from kepler_pipeline.stages.scene import scene as scene_stage
         from kepler_pipeline.stages.track import track as track_stage
 
@@ -177,11 +178,18 @@ class KeplerPipeline:
 
             tracks_2d = track_stage(frames, grid_size=8)
             depth_maps = depth_stage(frames)
-            scene_out = scene_stage(frames, depth_maps=depth_maps)
+
+            # Camera poses are identity in the static-camera approximation;
+            # constructing them inline lets lift + objects run BEFORE scene,
+            # which needs the object masks to keep people out of the room
+            # mesh and to pick clean background colors.
+            camera_poses = np.broadcast_to(
+                np.eye(4, dtype=np.float32), (len(frames), 4, 4)
+            ).copy()
             tracks_3d = lift_stage(
                 tracks_2d=tracks_2d,
                 depth_maps=depth_maps,
-                camera_poses=scene_out["camera_poses"],
+                camera_poses=camera_poses,
                 intrinsics=intrinsics,
                 frame_size=(width, height),
             )
@@ -194,6 +202,16 @@ class KeplerPipeline:
                 tracks_2d=tracks_2d,
                 tracks_3d=tracks_3d,
                 timestamps=timestamps,
+            )
+
+            # Moving/agent object boxes → per-frame exclusion masks so the
+            # scene stage rebuilds a clean static room + per-frame object
+            # cutouts. Static objects stay part of the room.
+            exclude_masks = build_exclude_masks(
+                object_reports, len(frames), height, width
+            )
+            scene_out = scene_stage(
+                frames, depth_maps=depth_maps, exclude_masks=exclude_masks
             )
 
             out_dir = Path("/artifacts") / request_id

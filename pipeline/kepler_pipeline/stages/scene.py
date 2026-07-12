@@ -5,8 +5,12 @@ reconstruction with recovered camera pose. Until that ships, we use a
 practical shortcut:
 
 - Assume a static-ish camera (identity pose per frame).
-- Build a coloured point cloud by back-projecting the first frame's RGB
-  through its depth map via a pinhole model.
+- Build a coloured point cloud by back-projecting a per-pixel temporal
+  *median* RGB plate through the median depth map via a pinhole model.
+  When ``exclude_masks`` (per-frame moving-object masks, built by the
+  caller from YOLO boxes) are provided, the median for each pixel only
+  uses the frames where that pixel is NOT covered by an object — the
+  background revealed when the object moves away.
 
 This is not a full 4D reconstruction but it *is* geometrically consistent
 with the depth map + trajectories — the point cloud aligns with what
@@ -15,6 +19,7 @@ happens in the video, which is all we need for the cinematic viewer.
 
 from __future__ import annotations
 
+import warnings
 from typing import TypedDict
 
 import numpy as np
@@ -56,6 +61,7 @@ def scene(
     frames: list[np.ndarray],
     depth_maps: np.ndarray | None = None,
     max_points: int = 60_000,
+    exclude_masks: np.ndarray | None = None,
 ) -> SceneOutput:
     """Return camera poses + a colored point cloud.
 
@@ -69,6 +75,12 @@ def scene(
     max_points:
         Target upper bound on point count. The frame is subsampled by
         stride to stay under this budget.
+    exclude_masks:
+        Optional ``(T, H, W)`` bool — True where a pixel belongs to a
+        moving/agent *object* at that frame (built by the caller from
+        detector boxes). Excluded pixels are dropped from the background
+        RGB median, removed from the static mesh where they dominate,
+        and used to sample per-frame dynamic point cutouts.
     """
 
     t = len(frames)
@@ -118,8 +130,44 @@ def scene(
     motion_threshold = np.maximum(0.15 * depth, 0.25)  # metres
     static_mask = depth_iqr < motion_threshold  # True where the pixel is stable
 
-    frame = frames[0]  # (H, W, 3) — RGB anchor from frame 0
     height, width = depth.shape
+
+    # Validate the exclude masks before trusting them: (T, H, W) bool
+    # aligned with the depth maps. Anything else is silently ignored so a
+    # malformed caller degrades to the old behaviour instead of crashing.
+    if exclude_masks is not None:
+        exclude_masks = np.asarray(exclude_masks)
+        if exclude_masks.shape != (t, height, width):
+            exclude_masks = None
+        else:
+            exclude_masks = exclude_masks.astype(bool, copy=False)
+
+    # Background RGB plate: per-pixel temporal median of RGB. Robust to
+    # moving objects the same way the depth median is — a person walking
+    # through leaves the wall colour, not their shirt. With exclude_masks
+    # the median only uses frames where the pixel is NOT covered by an
+    # object; pixels covered in ALL frames fall back to the plain median
+    # (the object never moved — it stays part of the scene).
+    frame_stack = np.stack(frames, axis=0).astype(np.float32)  # (T, H, W, 3)
+    rgb_plate = np.median(frame_stack, axis=0)  # (H, W, 3) float32
+    if exclude_masks is not None and exclude_masks.any():
+        frame_stack[exclude_masks] = np.nan
+        with warnings.catch_warnings():
+            # All-NaN pixels (excluded every frame) warn + yield NaN;
+            # we substitute the plain median for those below.
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            masked_median = np.nanmedian(frame_stack, axis=0)
+        rgb_plate = np.where(np.isnan(masked_median), rgb_plate, masked_median)
+    del frame_stack  # ~100 MB for 30×480×640 — release eagerly
+    rgb_plate = np.clip(rgb_plate, 0.0, 255.0).astype(np.uint8)
+
+    # Pixels occupied by a moving object in a big share of the frames are
+    # never trustworthy static geometry, even when their depth barely
+    # varies (a mostly-stationary person has low depth IQR but must not be
+    # baked into the room mesh as a blob).
+    if exclude_masks is not None:
+        exclude_any = exclude_masks.mean(axis=0) >= 0.4  # (H, W)
+        static_mask = static_mask & ~exclude_any
 
     # Choose a stride so we end up with ~max_points samples on the actual
     # frame dimensions. Solving `(H*W)/stride^2 <= max_points`.
@@ -142,7 +190,7 @@ def scene(
 
     xyz_grid = np.stack([x, y, z], axis=-1).astype(np.float32)  # (n_rows, n_cols, 3)
     xyz = xyz_grid.reshape(-1, 3)
-    rgb = frame[grid_v, grid_u].reshape(-1, 3).astype(np.uint8)
+    rgb = rgb_plate[grid_v, grid_u].reshape(-1, 3).astype(np.uint8)
 
     faces = _build_edge_filtered_faces(
         xyz_grid, n_rows, n_cols, static_grid=is_static_grid
@@ -157,11 +205,62 @@ def scene(
         cx=cx,
         cy=cy,
         max_points_per_frame=2_500,
+        exclude_masks=exclude_masks,
     )
 
     return SceneOutput(
         camera_poses=identity, xyz=xyz, rgb=rgb, faces=faces, dynamic=dynamic
     )
+
+
+def build_exclude_masks(
+    object_reports: list[dict],
+    num_frames: int,
+    height: int,
+    width: int,
+    margin: float = 0.08,
+) -> np.ndarray | None:
+    """Rasterise moving-object boxes from the ``objects`` stage reports
+    into per-frame exclusion masks for :func:`scene`.
+
+    An object is "moving" (and therefore excluded from the static room)
+    when its verdict is ``agent`` / ``morphing``, or its ballistic audit
+    marked it ``eligible`` (free-moving rigid body) or ``self-propelled``.
+    ``static`` objects stay — they are part of the room.
+
+    Each box (``boxes_norm``: frame-index string -> [x0, y0, x1, y1]
+    normalized 0..1) is expanded by ``margin`` (fraction of box size) on
+    all sides, clamped to the frame, to catch silhouette edges.
+
+    Returns ``(num_frames, height, width)`` bool, or ``None`` when no
+    pixel was excluded (callers then keep the legacy scene behaviour).
+    """
+
+    masks = np.zeros((num_frames, height, width), dtype=bool)
+    for report in object_reports:
+        ballistic = report.get("ballistic") or {}
+        moving = (
+            report.get("verdict") in ("agent", "morphing")
+            or bool(ballistic.get("eligible"))
+            or ballistic.get("reason") == "self-propelled"
+        )
+        if not moving:
+            continue
+        for frame_key, box in (report.get("boxes_norm") or {}).items():
+            f_idx = int(frame_key)
+            if not 0 <= f_idx < num_frames:
+                continue
+            x0, y0, x1, y1 = (float(v) for v in box)
+            dx = margin * (x1 - x0)
+            dy = margin * (y1 - y0)
+            c0 = max(0, int(np.floor((x0 - dx) * width)))
+            c1 = min(width, int(np.ceil((x1 + dx) * width)))
+            r0 = max(0, int(np.floor((y0 - dy) * height)))
+            r1 = min(height, int(np.ceil((y1 + dy) * height)))
+            if r1 > r0 and c1 > c0:
+                masks[f_idx, r0:r1, c0:c1] = True
+
+    return masks if masks.any() else None
 
 
 def _dynamic_points_per_frame(
@@ -173,13 +272,45 @@ def _dynamic_points_per_frame(
     cx: float,
     cy: float,
     max_points_per_frame: int = 2_500,
+    exclude_masks: np.ndarray | None = None,
 ) -> list[dict]:
     """Back-project each frame's *moving* pixels through that frame's depth.
 
-    Moving pixels = the complement of the static mask. Sampled at a stride
-    that keeps each frame under ``max_points_per_frame`` so the browser
-    payload stays lean (~30 frames × 2.5k pts ≈ manageable JSON).
+    With ``exclude_masks`` (T, H, W) each frame samples from THAT frame's
+    object mask — a clean per-frame cutout of the moving objects, colored
+    from that frame's RGB. Without it we fall back to the complement of
+    the global static mask. Either way sampled at a stride that keeps each
+    frame under ``max_points_per_frame`` so the browser payload stays lean
+    (~30 frames × 2.5k pts ≈ manageable JSON).
     """
+
+    def _empty() -> dict:
+        return {
+            "xyz": np.zeros((0, 3), np.float32),
+            "rgb": np.zeros((0, 3), np.uint8),
+        }
+
+    if exclude_masks is not None:
+        out_masked: list[dict] = []
+        for f_idx, frame in enumerate(frames):
+            mask = exclude_masks[f_idx]
+            n_pixels = int(mask.sum())
+            if n_pixels == 0:
+                out_masked.append(_empty())
+                continue
+            vs, us = np.nonzero(mask)
+            stride = max(1, int(np.ceil(n_pixels / max_points_per_frame)))
+            vs, us = vs[::stride], us[::stride]
+            z = depth_stack[f_idx, vs, us].astype(np.float32)
+            x = (us - cx) * z / fx
+            y = -(vs - cy) * z / fy
+            out_masked.append(
+                {
+                    "xyz": np.stack([x, y, z], axis=1).astype(np.float32),
+                    "rgb": frame[vs, us].astype(np.uint8),
+                }
+            )
+        return out_masked
 
     moving_mask = ~static_mask
     n_moving = int(moving_mask.sum())
