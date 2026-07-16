@@ -173,23 +173,25 @@ The Anthropic system prompt hard-codes these rules:
 
 ## Roadmap
 
-**Shipped**
+**Shipped (v1)**
 - [x] End-to-end analyze on Modal L4 with CoTracker3 + Depth Anything V2 + physics fit
-- [x] Colored point cloud (PLY with per-vertex RGB) from RGB + depth
-- [x] Cinematic R3F viewer with EffectComposer + auto-framed camera
-- [x] SVG residual timeline with 3σ threshold
-- [x] Streamed Claude Sonnet 4.5 verdict card
+- [x] Colored scene mesh (median-RGB background plate, moving objects excluded via YOLO masks) + per-frame dynamic 4D points synced to the timeline
+- [x] Object-centric audit: YOLOv8 detection + cross-frame identity, per-object ballistic verdicts (self-propelled classes exempt), morph detection (class flicker / rigidity / bbox jerk)
+- [x] Cinematic R3F viewer, recording-camera default pose, scrubbable σ timeline, labeled verdict boxes over the video, hologram object annotations
+- [x] 3D props quality ladder: placement math + Poly Pizza retrieval (keyed) + Tripo per-object "3d scan" (keyed)
+- [x] Streamed Claude Sonnet 4.5 verdict card (evidence-grounded, never claims "AI-generated")
 - [x] Physics module with pytest-covered adversarial cases
 
-**Next**
-- [ ] **Rename `kepler_*` modules to `yasbm_*`** — code still uses the old project name internally.
-- [ ] **VGGT for real camera pose recovery** — current `scene.py` assumes an identity pose per frame (works for static shots; wrong for anything else).
-- [ ] **Audio-visual physics sync** — extend the physics thesis to audio. Cross-correlate predicted contact events (residual/velocity minima) with audio peaks in the accompanying track. Feet-arrive-before-step, ball-bounces-before-contact, splash-pre-empts-water etc. are the same physics violation on a different sense. This absorbs the audio separation + sound-class detection layer from HEED (`../cuhacks`).
-- [ ] **Real/fake benchmark set** — curated pairs of real phone footage + Sora / Veo / Kling generations of the same prompt, with expected σ ranges. Currently we test on ad-hoc synthetic clips.
-- [ ] **Modal `min_containers=1` on the pipeline class during demo windows** — trades ~$0.80/hr for zero cold-start latency.
-- [ ] **N8AO ambient occlusion** — currently disabled because it fights with Bloom's depth-stencil handling on Chrome's WebGL2 driver. Restore once postprocessing decouples the depth attachment.
-- [ ] **Video-frame ghost backdrop** — sample the current playhead frame to a canvas texture rendered as a large plane behind the point cloud (opacity by distance).
-- [ ] **Provenance metadata check** — read C2PA manifests if present; note the presence/absence in the verdict card without treating either as dispositive.
+**v2 — decided, not yet built.** A two-agent adversarial research round produced the **D3-Anchored Hybrid** architecture: image-plane second-order statistics as the calibrated detector, per-segment image-plane parabola consistency as physics evidence, the 3D scene demoted to explainability, thresholds calibrated on Physics-IQ (real) vs VideoPhy-2 (fake). Full findings, kill list, and build plan (~2.5–3.5 days): **[RESEARCH-V2.md](RESEARCH-V2.md)**.
+
+**Later (validated, unscheduled)**
+- [ ] VGGT camera-pose recovery for moving-camera clips
+- [ ] ProxyPose (arXiv 2607.06555) for 6-DoF object pose → rotational-dynamics auditing + real prop orientation
+- [ ] Audio-visual physics sync (contact events vs audio peaks — absorbs HEED's audio layer)
+- [ ] Rename `kepler_*` modules to `yasbm_*`
+- [ ] C2PA provenance metadata check
+
+> **Note (2026-07-14): all external API keys are currently revoked.** `/analyze` and the full viewer run keyless (weights live in Modal Volumes); the Claude verdict falls back to deterministic copy, Poly Pizza/Tripo degrade gracefully. See OVERVIEW.md for the restore command.
 
 ---
 
